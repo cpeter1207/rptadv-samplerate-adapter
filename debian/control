@@ -1,0 +1,22 @@
+Source: rptadv-samplerate-adapter
+Section: libs
+Priority: optional
+Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
+Homepage: https://github.com/cpeter1207/rptadv-samplerate-adapter
+Build-Depends: cargo, debhelper-compat (= 13), libsamplerate0-dev, pkg-config, rustc
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+
+Package: librptadv-samplerate-adapter1
+Architecture: any
+Multi-Arch: same
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: libsamplerate adapter for rpt_advanced
+ Versioned dynamic libsamplerate adapter used by rpt_advanced media components.
+
+Package: librptadv-samplerate-adapter-dev
+Architecture: any
+Multi-Arch: same
+Depends: ${misc:Depends}, librptadv-samplerate-adapter1 (= ${binary:Version})
+Description: development files for the rpt_advanced sample-rate adapter
+ Public C header and pkg-config metadata for consumers of the dynamic adapter.

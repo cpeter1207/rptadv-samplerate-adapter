@@ -1,0 +1,10 @@
+/build/
+/.work/
+/target/
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/librptadv-samplerate-adapter1/
+/debian/librptadv-samplerate-adapter-dev/
+/debian/tmp/
+/debian/*.substvars

@@ -1,0 +1,3 @@
+Tests: install-check
+Depends: @, build-essential, pkg-config
+Restrictions: superficial

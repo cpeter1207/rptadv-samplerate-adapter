@@ -1,0 +1,11 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=@LIBDIR@
+includedir=${prefix}/include
+
+Name: rptadv_samplerate_adapter
+Description: libsamplerate adapter for rpt_advanced
+Version: @VERSION@
+URL: https://github.com/cpeter1207/rptadv-samplerate-adapter
+Libs: -L${libdir} -lrptadv_samplerate_adapter
+Cflags: -I${includedir}

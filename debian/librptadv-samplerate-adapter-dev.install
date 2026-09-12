@@ -1,0 +1,3 @@
+usr/include/rptadv_samplerate_adapter/rptadv_samplerate_adapter.h
+usr/lib/*/librptadv_samplerate_adapter.so
+usr/lib/*/pkgconfig/rptadv_samplerate_adapter.pc
