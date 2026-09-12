@@ -2,6 +2,9 @@
 ARG BASE_IMAGE=ghcr.io/cpeter1207/rpt-advanced-quality-debian13:latest
 FROM ${BASE_IMAGE}
 
+# Link the published quality image to its public source repository.
+LABEL org.opencontainers.image.source="https://github.com/cpeter1207/rptadv-samplerate-adapter"
+
 ARG TARGETARCH
 ARG RUSTUP_INIT_VERSION=1.28.2
 ARG RUST_STABLE=1.85.0
