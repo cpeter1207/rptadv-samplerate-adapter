@@ -1,0 +1,22 @@
+name: Publish quality image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - containers/quality.Dockerfile
+      - rust-toolchain.toml
+      - Cargo.lock
+      - .github/workflows/quality-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  quality-image:
+    uses: cpeter1207/rptadv-samplerate-adapter-workflows/.github/workflows/quality-image.yml@main
+    with:
+      code_ref: ${{ github.sha }}
+      image_tag: latest
