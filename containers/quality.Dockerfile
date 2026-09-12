@@ -16,7 +16,7 @@ ENV CARGO_HOME=/opt/cargo
 ENV PATH=/opt/cargo/bin:${PATH}
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-		autopkgtest ca-certificates cargo curl debhelper dpkg-dev libsamplerate0-dev pkg-config rustc && \
+		autopkgtest ca-certificates cargo curl debhelper docker-cli dpkg-dev iproute2 libsamplerate0-dev pkg-config rustc && \
 	rm -rf /var/lib/apt/lists/*
 
 RUN case "${TARGETARCH}" in \

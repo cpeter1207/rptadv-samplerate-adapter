@@ -1,0 +1,23 @@
+name: Publish documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Doxyfile
+      - include/**
+      - src/**
+      - tools/rust_to_doxygen.py
+      - .github/workflows/documentation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  documentation:
+    uses: cpeter1207/rptadv-samplerate-adapter-workflows/.github/workflows/documentation.yml@main
+    with:
+      code_ref: ${{ github.sha }}

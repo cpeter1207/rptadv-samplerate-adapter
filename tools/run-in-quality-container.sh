@@ -16,6 +16,15 @@ project_label='org.rptadvanced.test.project=rptadv-samplerate-adapter'
 scope_label="org.rptadvanced.test.scope=$scope"
 name="rptadv-samplerate-adapter-test-$scope-$$"
 pull_image=${RPTADV_CONTAINER_PULL:-1}
+pass_docker_socket=${RPTADV_CONTAINER_DOCKER_SOCKET:-0}
+
+case $pass_docker_socket in
+	0|1) ;;
+	*)
+		printf '%s\n' 'RPTADV_CONTAINER_DOCKER_SOCKET must be 0 or 1' >&2
+		exit 2
+		;;
+esac
 
 cleanup_stale()
 {
@@ -66,6 +75,14 @@ case $(uname -s) in
 		;;
 esac
 
-docker run --rm --name "$name" --label rpt_advanced.test=true \
-	--label "$project_label" --label "$scope_label" \
-	--volume "$host_root:/workspace" --workdir /workspace "$image" "$@"
+if [ "$pass_docker_socket" = '1' ]; then
+	docker run --rm --name "$name" --label rpt_advanced.test=true \
+		--label "$project_label" --label "$scope_label" \
+		--volume "$host_root:/workspace" \
+		--volume /var/run/docker.sock:/var/run/docker.sock \
+		--workdir /workspace "$image" "$@"
+else
+	docker run --rm --name "$name" --label rpt_advanced.test=true \
+		--label "$project_label" --label "$scope_label" \
+		--volume "$host_root:/workspace" --workdir /workspace "$image" "$@"
+fi

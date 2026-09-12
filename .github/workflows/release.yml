@@ -1,0 +1,16 @@
+name: Release
+
+on:
+  push:
+    tags: [v*]
+
+permissions:
+  checks: read
+  contents: write
+
+jobs:
+  release:
+    uses: cpeter1207/rptadv-samplerate-adapter-workflows/.github/workflows/release.yml@main
+    with:
+      code_ref: ${{ github.sha }}
+      tag: ${{ github.ref_name }}

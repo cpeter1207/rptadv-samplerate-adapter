@@ -16,9 +16,13 @@ descriptor smoke test through installed pkg-config metadata rather than using
 the build-tree header or library. Doxygen generation checks documented
 production Rust declarations and embeds their complete source context in the
 published reference pages.
-The `container-coverage` target builds a disposable derived image, pulls its
-maintained base first, and runs coverage through the labeled launcher.
+The `container-ci` target builds a disposable derived image, pulls its
+maintained base first, and runs the complete gate through the labeled launcher.
+It passes the Docker socket only to that project-owned outer container so
+`autopkgtest` can create a separate disposable source-owned testbed. The
+`container-coverage` target uses the same launcher without that socket.
 
 The project owns no persistent test containers. The launcher removes only
 containers carrying its exact project and workspace labels before and after a
-run.
+run. The package target applies the same labeled cleanup to its nested
+`autopkgtest` testbed before and after each run.

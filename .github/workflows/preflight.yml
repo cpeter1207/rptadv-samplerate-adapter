@@ -1,0 +1,14 @@
+name: Fast quality
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    uses: cpeter1207/rptadv-samplerate-adapter-workflows/.github/workflows/preflight.yml@main
+    with:
+      code_ref: ${{ github.sha }}
