@@ -19,9 +19,11 @@ modes that use short enum ABI values, which would be incompatible with this
 adapter's C-int descriptor ABI.
 
 Build a local shared object with `make`. Run fast source checks with
-`make lint static-analysis`, or the complete local gate with `make ci` in the
-project quality container. The complete gate also builds the Debian packages
-and runs their installed descriptor smoke test through `autopkgtest`.
+`make lint static-analysis`, or the complete local gate with `make ci`.
+`make container-ci` builds the project quality image and runs that gate in its
+labeled disposable container. The complete gate also builds the Debian packages
+and runs their installed descriptor smoke test through `autopkgtest` in a
+disposable source-owned Debian 13 testbed.
 `make install` installs the versioned shared object,
 public header, and pkg-config metadata. The public contract is documented in
 [`include/rptadv_samplerate_adapter/rptadv_samplerate_adapter.h`](include/rptadv_samplerate_adapter/rptadv_samplerate_adapter.h).

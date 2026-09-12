@@ -45,6 +45,9 @@ DEBIAN_RUNTIME_DEB = $(DEBIAN_OUTPUT_DIR)/librptadv-samplerate-adapter1_$(DEBIAN
 DEBIAN_DEV_DEB = $(DEBIAN_OUTPUT_DIR)/librptadv-samplerate-adapter-dev_$(DEBIAN_VERSION)_$(DEBIAN_ARCH).deb
 DEBIAN_STAGE = build/debian-package-stage
 AUTOPKGTEST_DIR = build/autopkgtest
+AUTOPKGTEST_TESTBED_IMAGE ?= ghcr.io/cpeter1207/rptadv-samplerate-adapter-ci:latest
+AUTOPKGTEST_PROJECT_LABEL = org.rptadvanced.test.project=$(PACKAGE)
+AUTOPKGTEST_SCOPE_LABEL = org.rptadvanced.test.scope=autopkgtest
 COVERAGE_TOOLCHAIN ?= nightly-2025-02-20
 COVERAGE_DIR = build/coverage
 COVERAGE_TARGET_DIR = build/llvm-cov-target
@@ -58,7 +61,7 @@ QUALITY_LAUNCHER = tools/run-in-quality-container.sh
 SONAME_RUSTFLAGS = $(RUSTFLAGS) -C link-arg=-Wl,-soname,$(LIBRARY_BASENAME).so.$(SOVERSION)
 
 .PHONY: all quality lint static-analysis docs test coverage install install-check \
-	debian-package-check autopkgtest dist distcheck platform-verify ci quality-image container-coverage clean FORCE
+	debian-package-check autopkgtest dist distcheck platform-verify ci quality-image container-ci container-coverage clean FORCE
 
 all: $(LIBRARY_VERSIONED) $(LIBRARY_SONAME) $(LIBRARY_LINK)
 
@@ -118,11 +121,15 @@ coverage:
 
 quality-image:
 	docker image pull $(QUALITY_BASE_IMAGE)
+	docker image pull $(AUTOPKGTEST_TESTBED_IMAGE)
 	docker build --pull --build-arg BASE_IMAGE=$(QUALITY_BASE_IMAGE) --tag $(QUALITY_IMAGE) \
 		--file containers/quality.Dockerfile containers
 
 container-coverage: quality-image
 	RPTADV_CONTAINER_PULL=0 $(QUALITY_LAUNCHER) $(QUALITY_IMAGE) $(MAKE) coverage
+
+container-ci: quality-image
+	RPTADV_CONTAINER_PULL=0 RPTADV_CONTAINER_DOCKER_SOCKET=1 $(QUALITY_LAUNCHER) $(QUALITY_IMAGE) $(MAKE) ci
 
 install: all $(PC_FILE)
 	install -d $(DESTDIR)$(LIBDIR) \
@@ -190,8 +197,21 @@ debian-package-check: dist
 autopkgtest: debian-package-check
 	rm -rf $(AUTOPKGTEST_DIR)
 	mkdir -p $(AUTOPKGTEST_DIR)
-	$(AUTOPKGTEST) --output-dir $(AUTOPKGTEST_DIR) \
-		$(DEBIAN_RUNTIME_DEB) $(DEBIAN_DEV_DEB) . -- null
+	set -eu; \
+	cleanup() { \
+		docker container ls --all --quiet --filter 'label=rpt_advanced.test=true' \
+			--filter 'label=$(AUTOPKGTEST_PROJECT_LABEL)' \
+			--filter 'label=$(AUTOPKGTEST_SCOPE_LABEL)' | \
+			xargs -r docker container rm --force >/dev/null 2>&1 || true; \
+	}; \
+	cleanup; \
+	trap 'status=$$?; cleanup; exit $$status' EXIT; \
+	$(AUTOPKGTEST) -U --output-dir $(AUTOPKGTEST_DIR) \
+		$(DEBIAN_RUNTIME_DEB) $(DEBIAN_DEV_DEB) . -- \
+		docker --no-init $(AUTOPKGTEST_TESTBED_IMAGE) \
+		--label rpt_advanced.test=true \
+		--label $(AUTOPKGTEST_PROJECT_LABEL) \
+		--label $(AUTOPKGTEST_SCOPE_LABEL)
 
 dist: | build
 	rm -rf build/dist
