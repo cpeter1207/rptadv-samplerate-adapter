@@ -1,0 +1,16 @@
+name: Required quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: cpeter1207/rptadv-samplerate-adapter-workflows/.github/workflows/quality.yml@main
+    with:
+      code_ref: ${{ github.sha }}
