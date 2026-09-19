@@ -1,3 +1,10 @@
+rptadv-samplerate-adapter (0.1.0~alpha2-1) unstable; urgency=medium
+
+  * Publish the next Debian 13 alpha packages with the existing ABI-major-1
+    sample-rate conversion interface.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Sat, 19 Sep 2026 09:00:00 -0500
+
 rptadv-samplerate-adapter (0.1.0~alpha1-1) unstable; urgency=medium
 
   * Initial libsamplerate adapter package.
