@@ -6,6 +6,7 @@ on:
 
 permissions:
   checks: read
+  pull-requests: read
   contents: write
 
 jobs:
