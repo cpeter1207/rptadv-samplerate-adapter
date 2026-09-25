@@ -31,12 +31,14 @@ const LIBSAMPLERATE_ERROR: c_int = -2;
 /// ABI v1 intentionally supports mono conversion only.
 const UNSUPPORTED: c_int = -3;
 
-/// Highest-quality band-limited sinc conversion.
+/// Stable ABI value for the former highest-quality sinc selection.
 const SINC_BEST: c_int = 0;
-/// Medium-quality band-limited sinc conversion.
+/// Stable ABI value for the former medium-quality sinc selection.
 const SINC_MEDIUM: c_int = 1;
-/// Fastest band-limited sinc conversion.
+/// Stable ABI value for the former low-latency sinc selection.
 const SINC_FASTEST: c_int = 2;
+/// libsamplerate linear interpolation converter.
+const SRC_LINEAR: c_int = 4;
 
 const _: () = assert!(SINC_BEST == 0);
 const _: () = assert!(SINC_MEDIUM == 1);
@@ -87,12 +89,10 @@ pub struct AdapterDescriptor {
 // and function pointers all refer to immutable static code or storage.
 unsafe impl Sync for AdapterDescriptor {}
 
-/// Map one ABI quality selection to its matching libsamplerate converter type.
+/// Map each stable ABI selector to libsamplerate's linear converter.
 fn converter_type(quality: c_int) -> Option<c_int> {
     match quality {
-        SINC_BEST => Some(SINC_BEST),
-        SINC_MEDIUM => Some(SINC_MEDIUM),
-        SINC_FASTEST => Some(SINC_FASTEST),
+        SINC_BEST | SINC_MEDIUM | SINC_FASTEST => Some(SRC_LINEAR),
         _ => None,
     }
 }

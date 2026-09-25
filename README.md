@@ -5,11 +5,11 @@ adapter for `rpt_advanced`. It implements the narrow descriptor specified by
 ADR 0022 so controller and ring code have no direct libsamplerate ABI
 dependency.
 
-The adapter creates persistent mono sinc converters and exchanges normalized
-interleaved F32 PCM (`-1.0` through `+1.0`) without format conversion. ABI v1
-offers the libsamplerate best, medium, and fastest band-limited sinc quality
-levels. It dynamically links `libsamplerate.so`; it neither bundles nor
-static-links libsamplerate.
+The adapter creates persistent mono `SRC_LINEAR` converters and exchanges
+normalized interleaved F32 PCM (`-1.0` through `+1.0`) without format
+conversion. ABI v1 continues accepting its best, medium, and fastest quality
+selectors, but all select linear interpolation. It dynamically links
+`libsamplerate.so`; it neither bundles nor static-links libsamplerate.
 
 The public descriptor is selected by the stable
 `RPTADV_SAMPLERATE_ADAPTER_CAPABILITY` macro. Consumers verify that name, the
