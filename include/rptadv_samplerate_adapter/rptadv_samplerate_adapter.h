@@ -38,13 +38,13 @@ enum rptadv_samplerate_adapter_result {
 	RPTADV_SAMPLERATE_ADAPTER_UNSUPPORTED = -3,
 };
 
-/** @brief libsamplerate sinc quality selections supported by this adapter. */
+/** @brief Stable accepted selectors; each currently selects SRC_LINEAR. */
 enum rptadv_samplerate_quality {
-	/** Highest-quality band-limited sinc conversion. */
+	/** Former highest-quality selector, retained for ABI compatibility. */
 	RPTADV_SAMPLERATE_QUALITY_SINC_BEST = 0,
-	/** Medium-quality band-limited sinc conversion. */
+	/** Former medium-quality selector, retained for ABI compatibility. */
 	RPTADV_SAMPLERATE_QUALITY_SINC_MEDIUM = 1,
-	/** Fastest band-limited sinc conversion. */
+	/** Former low-latency selector, retained for ABI compatibility. */
 	RPTADV_SAMPLERATE_QUALITY_SINC_FASTEST = 2,
 };
 
@@ -80,7 +80,7 @@ struct rptadv_samplerate_adapter_descriptor {
 		enum rptadv_samplerate_quality quality, uint32_t channels,
 		struct rptadv_samplerate_converter **out_converter);
 	/**
-	 * @brief Discard persistent filter history without changing converter quality.
+	 * @brief Discard persistent filter history without changing converter type.
 	 *
 	 * @param converter Converter obtained from @ref create.
 	 * @return One @ref rptadv_samplerate_adapter_result value.
@@ -102,7 +102,7 @@ struct rptadv_samplerate_adapter_descriptor {
 	 *
 	 * The operation accepts any bounded input and output block sizes. A
 	 * successful call may consume or generate zero frames while the persistent
-	 * sinc filter gathers history. Callers resubmit the unconsumed tail on the
+	 * converter gathers history. Callers resubmit the unconsumed tail on the
 	 * next call. Input and output buffers must not overlap. ABI v1 represents a
 	 * continuing stream only; it deliberately has no end-of-input tail flush.
 	 */

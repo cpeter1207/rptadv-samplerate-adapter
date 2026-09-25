@@ -180,11 +180,11 @@ fn descriptor_identifies_abi_v1_and_complete_function_table() {
 }
 
 #[test]
-fn create_maps_all_supported_sinc_qualities_without_external_types() {
+fn create_maps_all_supported_qualities_to_linear() {
     for quality in [SINC_BEST, SINC_MEDIUM, SINC_FASTEST] {
         let converter = fake_converter(quality);
         let converter_ref = unsafe { &*converter };
-        assert_eq!(fake_state(converter_ref).quality, quality);
+        assert_eq!(fake_state(converter_ref).quality, 4);
         assert_eq!(fake_state(converter_ref).channels, 1);
         destroy(converter);
     }

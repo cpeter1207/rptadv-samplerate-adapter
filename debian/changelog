@@ -1,3 +1,9 @@
+rptadv-samplerate-adapter (0.1.0~alpha3-1) unstable; urgency=medium
+
+  * Map all stable converter selectors to SRC_LINEAR without changing ABI v1.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Fri, 25 Sep 2026 07:35:01 -0500
+
 rptadv-samplerate-adapter (0.1.0~alpha2-1) unstable; urgency=medium
 
   * Publish the next Debian 13 alpha packages with the existing ABI-major-1
