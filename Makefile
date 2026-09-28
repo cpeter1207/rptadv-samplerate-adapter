@@ -14,8 +14,8 @@ PYTHON ?= python3
 
 PACKAGE := rptadv-samplerate-adapter
 CRATE := rptadv_samplerate_adapter
-PACKAGE_VERSION ?= 0.1.0-alpha.3
-SOVERSION := 1
+PACKAGE_VERSION ?= 0.2.0-alpha.1
+SOVERSION := 2
 PREFIX ?= /usr/local
 DESTDIR ?=
 LIBDIR ?= $(PREFIX)/lib
@@ -41,7 +41,7 @@ DEBIAN_ARCH = $(shell dpkg-architecture -qDEB_HOST_ARCH)
 DEBIAN_MULTIARCH = $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
 DEBIAN_SOURCE_PARENT = build/debian-source
 DEBIAN_OUTPUT_DIR = $(abspath $(DEBIAN_SOURCE_PARENT))
-DEBIAN_RUNTIME_DEB = $(DEBIAN_OUTPUT_DIR)/librptadv-samplerate-adapter1_$(DEBIAN_VERSION)_$(DEBIAN_ARCH).deb
+DEBIAN_RUNTIME_DEB = $(DEBIAN_OUTPUT_DIR)/librptadv-samplerate-adapter2_$(DEBIAN_VERSION)_$(DEBIAN_ARCH).deb
 DEBIAN_DEV_DEB = $(DEBIAN_OUTPUT_DIR)/librptadv-samplerate-adapter-dev_$(DEBIAN_VERSION)_$(DEBIAN_ARCH).deb
 DEBIAN_STAGE = build/debian-package-stage
 AUTOPKGTEST_DIR = build/autopkgtest
@@ -106,6 +106,9 @@ test: all
 	$(CARGO) test --all-targets --locked
 	$(MAKE) $(C_SMOKE_BINARY)
 	./$(C_SMOKE_BINARY)
+	$(CC) -std=c11 -Wall -Wextra -Werror tests/swr_contract.c tests/allocation_guard.c \
+		-Lbuild -l$(CRATE) -lm -Wl,-rpath,'$$ORIGIN' -o build/swr-contract
+	./build/swr-contract
 
 $(C_SMOKE_BINARY): $(C_SMOKE_SOURCE) $(HEADER) $(LIBRARY_LINK) | build
 	$(CC) -std=c11 -Wall -Wextra -Werror -Iinclude $< -Lbuild \
@@ -150,7 +153,8 @@ install-check: all
 	test ! -e build/stage/usr/lib/$(LIBRARY_BASENAME).a
 	$(READELF) -d build/stage/usr/lib/$(notdir $(LIBRARY_VERSIONED)) | \
 		grep -F '$(LIBRARY_BASENAME).so.$(SOVERSION)'
-	$(READELF) -d build/stage/usr/lib/$(notdir $(LIBRARY_VERSIONED)) | grep -F 'libsamplerate.so'
+	$(READELF) -d build/stage/usr/lib/$(notdir $(LIBRARY_VERSIONED)) | grep -F 'libswresample.so'
+	! $(READELF) -d build/stage/usr/lib/$(notdir $(LIBRARY_VERSIONED)) | grep -F 'libsamplerate.so'
 	test -f build/stage/usr/include/rptadv_samplerate_adapter/$(notdir $(HEADER))
 	test -f build/stage/usr/lib/pkgconfig/rptadv_samplerate_adapter.pc
 	$(CC) -std=c11 -Wall -Wextra -Werror $(C_SMOKE_SOURCE) \
@@ -184,7 +188,8 @@ debian-package-check: dist
 	$(READELF) -d "$(DEBIAN_STAGE)/usr/lib/$(DEBIAN_MULTIARCH)/$(LIBRARY_BASENAME).so.$(SOVERSION)" | \
 		grep -F '$(LIBRARY_BASENAME).so.$(SOVERSION)'
 	$(READELF) -d "$(DEBIAN_STAGE)/usr/lib/$(DEBIAN_MULTIARCH)/$(LIBRARY_BASENAME).so.$(SOVERSION)" | \
-		grep -F 'libsamplerate.so'
+		grep -F 'libswresample.so'
+	! $(READELF) -d "$(DEBIAN_STAGE)/usr/lib/$(DEBIAN_MULTIARCH)/$(LIBRARY_BASENAME).so.$(SOVERSION)" | grep -F 'libsamplerate.so'
 	$(CC) -std=c11 -Wall -Wextra -Werror $(C_SMOKE_SOURCE) \
 		$$(PKG_CONFIG_LIBDIR="$(CURDIR)/$(DEBIAN_STAGE)/usr/lib/$(DEBIAN_MULTIARCH)/pkgconfig" \
 			PKG_CONFIG_SYSROOT_DIR="$(CURDIR)/$(DEBIAN_STAGE)" \
@@ -219,7 +224,7 @@ dist: | build
 	tar --exclude=.git --exclude=.work --exclude=build --exclude=target \
 		--exclude=debian/.debhelper --exclude=debian/debhelper-build-stamp \
 		--exclude=debian/files --exclude=debian/tmp \
-		--exclude=debian/librptadv-samplerate-adapter1 \
+		--exclude=debian/librptadv-samplerate-adapter2 \
 		--exclude=debian/librptadv-samplerate-adapter-dev \
 		--exclude='debian/*.substvars' --exclude='debian/*.debhelper.log' \
 		--transform='s|^|$(PACKAGE)-$(PACKAGE_VERSION)/|' -czf build/$(PACKAGE)-$(PACKAGE_VERSION).tar.gz \
@@ -228,7 +233,7 @@ dist: | build
 
 distcheck: dist
 	! tar -tzf build/$(PACKAGE)-$(PACKAGE_VERSION).tar.gz | \
-		grep -E '/debian/(\.debhelper/|debhelper-build-stamp$$|files$$|tmp/|librptadv-samplerate-adapter(1|-dev)/|.*\.(substvars|debhelper\.log)$$)'
+		grep -E '/debian/(\.debhelper/|debhelper-build-stamp$$|files$$|tmp/|librptadv-samplerate-adapter(2|-dev)/|.*\.(substvars|debhelper\.log)$$)'
 	rm -rf build/dist-unpacked
 	mkdir -p build/dist-unpacked
 	tar -C build/dist-unpacked -xzf build/$(PACKAGE)-$(PACKAGE_VERSION).tar.gz
