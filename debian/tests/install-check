@@ -46,6 +46,7 @@ int main(void)
 EOF
 
 pkg-config --exists rptadv_samplerate_adapter
+test "$(pkg-config --variable=abi_version rptadv_samplerate_adapter)" = 2
 # shellcheck disable=SC2046 # pkg-config deliberately emits separate compiler arguments.
 cc -std=c11 -Wall -Wextra -Werror "$workdir/descriptor_smoke.c" \
 	$(pkg-config --cflags --libs rptadv_samplerate_adapter) \

@@ -150,6 +150,7 @@ install-check: all
 	test -f build/stage/usr/lib/$(notdir $(LIBRARY_VERSIONED))
 	test -L build/stage/usr/lib/$(notdir $(LIBRARY_SONAME))
 	test -L build/stage/usr/lib/$(notdir $(LIBRARY_LINK))
+	test "$$(PKG_CONFIG_LIBDIR=build/stage/usr/lib/pkgconfig pkg-config --variable=abi_version rptadv_samplerate_adapter)" = $(SOVERSION)
 	test ! -e build/stage/usr/lib/$(LIBRARY_BASENAME).a
 	$(READELF) -d build/stage/usr/lib/$(notdir $(LIBRARY_VERSIONED)) | \
 		grep -F '$(LIBRARY_BASENAME).so.$(SOVERSION)'

@@ -2,6 +2,7 @@ prefix=@PREFIX@
 exec_prefix=${prefix}
 libdir=@LIBDIR@
 includedir=${prefix}/include
+abi_version=2
 
 Name: rptadv_samplerate_adapter
 Description: Prepared libswresample adapter for rpt_advanced
