@@ -2,6 +2,32 @@
 
 use super::*;
 
+#[test]
+fn prepared_resampler_uses_full_bandwidth_cutoff() {
+    unsafe extern "C" {
+        fn av_opt_get_double(
+            object: *mut std::ffi::c_void,
+            name: *const c_char,
+            flags: c_int,
+            value: *mut f64,
+        ) -> c_int;
+    }
+    let converter = prepare(48000, 8000, 256, 256).unwrap();
+    let mut cutoff = 0.0;
+    assert_eq!(
+        unsafe {
+            av_opt_get_double(
+                converter.state.as_ptr().cast(),
+                c"cutoff".as_ptr(),
+                0,
+                &mut cutoff,
+            )
+        },
+        0
+    );
+    assert_eq!(cutoff, 1.0);
+}
+
 fn handle() -> *mut Converter {
     let mut value = ptr::null_mut();
     assert_eq!(create(48000, 8000, 256, 256, &mut value), OK);

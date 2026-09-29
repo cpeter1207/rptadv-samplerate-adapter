@@ -184,7 +184,7 @@ fn prepare(
     ] {
         integer_option(state, name, value)?;
     }
-    if unsafe { ffi::av_opt_set_double(state.as_ptr().cast(), c"cutoff".as_ptr(), 0.985, 0) } < 0 {
+    if unsafe { ffi::av_opt_set_double(state.as_ptr().cast(), c"cutoff".as_ptr(), 1.0, 0) } < 0 {
         return Err(BACKEND_ERROR);
     }
     if unsafe { ffi::swr_init(state.as_ptr()) } < 0
