@@ -7,7 +7,7 @@ dependency.
 
 The adapter prepares persistent mono libswresample converters and exchanges
 normalized F32 PCM (`-1.0` through `+1.0`). Conversion uses the SWR engine,
-filter size 64, cutoff 0.985, and a Kaiser window. Forced resampling supports
+filter size 32, cutoff 0.985, and a Kaiser window. Forced resampling supports
 soft clock compensation even when nominal input/output rates match. Each
 process ratio stays within 1000 ppm of the fixed nominal ratio.
 
