@@ -11,8 +11,27 @@ fn prepared_resampler_uses_full_bandwidth_cutoff() {
             flags: c_int,
             value: *mut f64,
         ) -> c_int;
+        fn av_opt_get_int(
+            object: *mut std::ffi::c_void,
+            name: *const c_char,
+            flags: c_int,
+            value: *mut i64,
+        ) -> c_int;
     }
     let converter = prepare(48000, 8000, 256, 256).unwrap();
+    let mut filter_size = 0;
+    assert_eq!(
+        unsafe {
+            av_opt_get_int(
+                converter.state.as_ptr().cast(),
+                c"filter_size".as_ptr(),
+                0,
+                &mut filter_size,
+            )
+        },
+        0
+    );
+    assert_eq!(filter_size, 64);
     let mut cutoff = 0.0;
     assert_eq!(
         unsafe {

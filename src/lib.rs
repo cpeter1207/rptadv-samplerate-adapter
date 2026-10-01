@@ -23,6 +23,8 @@ const BACKEND_ERROR: c_int = -2;
 const UNSUPPORTED: c_int = -3;
 /// Compensation duration in output frames; one unit resolves one ppm.
 const COMPENSATION_DISTANCE: c_int = 1_000_000;
+/// Fixed SWR Kaiser filter size used by each prepared converter.
+const FILTER_SIZE: usize = 64;
 
 /// Exclusively owned, fully prepared mono resampler.
 pub struct Converter {
@@ -144,7 +146,7 @@ fn prepare(
     }
     // FFmpeg expands a downsampling FIR by its inverse cutoff. This
     // conservative bound covers its even-length rounding and initial mirror.
-    let history = (256.0 / (nominal_ratio * 0.985).min(1.0)).ceil() as usize + 4;
+    let history = (FILTER_SIZE as f64 / (nominal_ratio * 0.985).min(1.0)).ceil() as usize + 4;
     let warm_length = history
         .checked_mul(4)
         .and_then(|length| length.checked_add(maximum_input as usize * 2))
@@ -177,7 +179,7 @@ fn prepare(
     for (name, value) in [
         (c"in_sample_rate", i64::from(input_rate)),
         (c"out_sample_rate", i64::from(output_rate)),
-        (c"filter_size", 256),
+        (c"filter_size", FILTER_SIZE as i64),
         (c"filter_type", 2), // SWR_FILTER_TYPE_KAISER from FFmpeg's public enum.
         (c"flags", 1),       // SWR_FLAG_RESAMPLE also enables equal-rate compensation.
         (c"exact_rational", 0),

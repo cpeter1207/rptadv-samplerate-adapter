@@ -29,7 +29,7 @@ libswresample and libavutil and exposes no FFmpeg types. Internal PCM is mono,
 normalized IEEE-754 binary32 from `-1.0` through `+1.0`.
 
 ABI2 construction receives nominal input/output rates and maximum frame counts.
-Its fixed SWR filter uses size 256, cutoff 1.0, and a Kaiser window. Changes
+Its fixed SWR filter uses size 64, cutoff 1.0, and a Kaiser window. Changes
 to independent-clock timing use soft compensation within 1000 ppm of nominal.
 
 The persistent conversion, reset, and queue-observation operations are allocation-free, lock-free,
