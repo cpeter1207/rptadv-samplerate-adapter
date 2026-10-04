@@ -24,7 +24,7 @@ const UNSUPPORTED: c_int = -3;
 /// Compensation duration in output frames; one unit resolves one ppm.
 const COMPENSATION_DISTANCE: c_int = 1_000_000;
 /// Fixed SWR Kaiser filter size used by each prepared converter.
-const FILTER_SIZE: usize = 32;
+const FILTER_SIZE: usize = 16;
 
 /// Exclusively owned, fully prepared mono resampler.
 pub struct Converter {
