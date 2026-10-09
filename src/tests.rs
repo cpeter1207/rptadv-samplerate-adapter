@@ -55,6 +55,102 @@ fn handle() -> *mut Converter {
 }
 
 #[test]
+fn preparation_reports_each_backend_failure() {
+    for failure in [
+        TestFailure::Zeroed,
+        TestFailure::Allocate,
+        TestFailure::Option,
+        TestFailure::IntegerOption,
+        TestFailure::DoubleOption,
+        TestFailure::Initialize,
+        TestFailure::Compensation,
+    ] {
+        TEST_FAILURE.with(|pending| pending.set(Some(failure)));
+        assert_eq!(
+            prepare(48000, 8000, 256, 256).map(|_| ()),
+            Err(BACKEND_ERROR)
+        );
+    }
+}
+
+#[test]
+fn reset_and_processing_report_backend_failures() {
+    let value = handle();
+    TEST_FAILURE.with(|pending| pending.set(Some(TestFailure::Compensation)));
+    assert_eq!(reset(value), BACKEND_ERROR);
+    destroy(value);
+
+    let value = handle();
+    TEST_FAILURE.with(|pending| pending.set(Some(TestFailure::Convert)));
+    assert_eq!(reset(value), BACKEND_ERROR);
+    destroy(value);
+
+    let value = handle();
+    let input = [0.25; 8];
+    let mut output = [0.0; 8];
+    let (mut used, mut generated) = (0, 0);
+    TEST_FAILURE.with(|pending| pending.set(Some(TestFailure::Compensation)));
+    assert_eq!(
+        process(
+            value,
+            input.as_ptr(),
+            input.len() as u32,
+            output.as_mut_ptr(),
+            output.len() as u32,
+            1.0 / 6.0,
+            &mut used,
+            &mut generated,
+        ),
+        BACKEND_ERROR
+    );
+
+    TEST_FAILURE.with(|pending| pending.set(Some(TestFailure::Convert)));
+    assert_eq!(
+        process(
+            value,
+            input.as_ptr(),
+            input.len() as u32,
+            output.as_mut_ptr(),
+            output.len() as u32,
+            1.0 / 6.0,
+            &mut used,
+            &mut generated,
+        ),
+        BACKEND_ERROR
+    );
+    destroy(value);
+}
+
+#[test]
+fn reset_discards_ready_output_without_flushing_the_stream() {
+    let value = handle();
+    let input = [0.25; 256];
+    let mut output = [0.0; 1];
+    let (mut used, mut generated) = (0, 0);
+    assert_eq!(
+        process(
+            value,
+            input.as_ptr(),
+            input.len() as u32,
+            output.as_mut_ptr(),
+            output.len() as u32,
+            1.0 / 6.0,
+            &mut used,
+            &mut generated,
+        ),
+        OK
+    );
+    assert_eq!(generated, 1);
+    assert_eq!(reset(value), OK);
+    destroy(value);
+}
+
+#[test]
+fn descriptor_is_available_before_converter_creation() {
+    assert!(!rptadv_samplerate_adapter_descriptor().is_null());
+}
+
+#[test]
 fn constructor_rejects_unrepresentable_setup_and_clears_output() {
     assert_eq!(
         create(48000, 8000, 256, 256, ptr::null_mut()),

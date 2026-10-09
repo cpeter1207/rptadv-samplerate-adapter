@@ -11,6 +11,9 @@ use std::ffi::{CStr, c_char, c_int};
 use std::mem::size_of;
 use std::ptr::{self, NonNull};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 /// Descriptor ABI for explicit nominal rates and bounded setup.
 const ABI_VERSION: u32 = 2;
 /// Successful operation.
@@ -25,6 +28,98 @@ const UNSUPPORTED: c_int = -3;
 const COMPENSATION_DISTANCE: c_int = 1_000_000;
 /// Fixed SWR Kaiser filter size used by each prepared converter.
 const FILTER_SIZE: usize = 16;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TestFailure {
+    Zeroed,
+    Allocate,
+    Option,
+    IntegerOption,
+    DoubleOption,
+    Initialize,
+    Compensation,
+    Convert,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FAILURE: Cell<Option<TestFailure>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+fn take_test_failure(failure: TestFailure) -> bool {
+    TEST_FAILURE.with(|pending| {
+        if pending.get() == Some(failure) {
+            pending.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(test)]
+macro_rules! fail_if_requested {
+    ($failure:expr, $error:expr) => {
+        if take_test_failure($failure) {
+            return $error;
+        }
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! fail_if_requested {
+    ($failure:expr, $error:expr) => {};
+}
+
+#[inline]
+fn swr_alloc() -> *mut ffi::SwrContext {
+    fail_if_requested!(TestFailure::Allocate, ptr::null_mut());
+    unsafe { ffi::swr_alloc() }
+}
+
+#[inline]
+fn swr_init(state: *mut ffi::SwrContext) -> c_int {
+    fail_if_requested!(TestFailure::Initialize, -1);
+    unsafe { ffi::swr_init(state) }
+}
+
+#[inline]
+fn swr_convert(
+    state: *mut ffi::SwrContext,
+    output: *const *mut u8,
+    output_frames: c_int,
+    input: *const *const u8,
+    input_frames: c_int,
+) -> c_int {
+    fail_if_requested!(TestFailure::Convert, -1);
+    unsafe { ffi::swr_convert(state, output, output_frames, input, input_frames) }
+}
+
+#[inline]
+fn swr_set_compensation(state: *mut ffi::SwrContext, delta: c_int, distance: c_int) -> c_int {
+    fail_if_requested!(TestFailure::Compensation, -1);
+    unsafe { ffi::swr_set_compensation(state, delta, distance) }
+}
+
+#[inline]
+fn av_opt_set(state: *mut ffi::SwrContext, name: *const c_char, value: *const c_char) -> c_int {
+    fail_if_requested!(TestFailure::Option, -1);
+    unsafe { ffi::av_opt_set(state.cast(), name, value, 0) }
+}
+
+#[inline]
+fn av_opt_set_int(state: *mut ffi::SwrContext, name: *const c_char, value: i64) -> c_int {
+    fail_if_requested!(TestFailure::IntegerOption, -1);
+    unsafe { ffi::av_opt_set_int(state.cast(), name, value, 0) }
+}
+
+#[inline]
+fn av_opt_set_double(state: *mut ffi::SwrContext, name: *const c_char, value: f64) -> c_int {
+    fail_if_requested!(TestFailure::DoubleOption, -1);
+    unsafe { ffi::av_opt_set_double(state.cast(), name, value, 0) }
+}
 
 /// Exclusively owned, fully prepared mono resampler.
 pub struct Converter {
@@ -52,15 +147,13 @@ impl Converter {
     fn discard_conversion(&mut self, input_frames: usize) -> Result<c_int, c_int> {
         let input = self.zeros.as_ptr().cast::<u8>();
         let output = self.discard.as_mut_ptr().cast::<u8>();
-        let result = unsafe {
-            ffi::swr_convert(
-                self.state.as_ptr(),
-                &output,
-                self.maximum_output as c_int,
-                &input,
-                input_frames as c_int,
-            )
-        };
+        let result = swr_convert(
+            self.state.as_ptr(),
+            &output,
+            self.maximum_output as c_int,
+            &input,
+            input_frames as c_int,
+        );
         if result < 0 {
             Err(BACKEND_ERROR)
         } else {
@@ -76,7 +169,7 @@ impl Converter {
 
     /// Replace old PCM with silence without freeing state or changing phase.
     fn clear_history(&mut self) -> Result<(), c_int> {
-        if unsafe { ffi::swr_set_compensation(self.state.as_ptr(), 0, 0) } < 0 {
+        if swr_set_compensation(self.state.as_ptr(), 0, 0) < 0 {
             return Err(BACKEND_ERROR);
         }
         self.drain_discard()?;
@@ -98,6 +191,7 @@ impl Converter {
 
 /// Allocate zeroed control-plane storage with recoverable allocation failure.
 fn zeroed(length: usize) -> Result<Vec<f32>, c_int> {
+    fail_if_requested!(TestFailure::Zeroed, Err(BACKEND_ERROR));
     let mut samples = Vec::new();
     samples
         .try_reserve_exact(length)
@@ -108,7 +202,7 @@ fn zeroed(length: usize) -> Result<Vec<f32>, c_int> {
 
 /// Apply one string-valued option while the context is uninitialized.
 fn option(state: NonNull<ffi::SwrContext>, name: &CStr, value: &CStr) -> Result<(), c_int> {
-    if unsafe { ffi::av_opt_set(state.as_ptr().cast(), name.as_ptr(), value.as_ptr(), 0) } < 0 {
+    if av_opt_set(state.as_ptr(), name.as_ptr(), value.as_ptr()) < 0 {
         Err(BACKEND_ERROR)
     } else {
         Ok(())
@@ -117,7 +211,7 @@ fn option(state: NonNull<ffi::SwrContext>, name: &CStr, value: &CStr) -> Result<
 
 /// Apply one integer configuration option before initialization.
 fn integer_option(state: NonNull<ffi::SwrContext>, name: &CStr, value: i64) -> Result<(), c_int> {
-    if unsafe { ffi::av_opt_set_int(state.as_ptr().cast(), name.as_ptr(), value, 0) } < 0 {
+    if av_opt_set_int(state.as_ptr(), name.as_ptr(), value) < 0 {
         Err(BACKEND_ERROR)
     } else {
         Ok(())
@@ -154,7 +248,7 @@ fn prepare(
         .ok_or(UNSUPPORTED)?;
     let zeros = zeroed(warm_length)?;
     let discard = zeroed(maximum_output as usize)?;
-    let state = NonNull::new(unsafe { ffi::swr_alloc() }).ok_or(BACKEND_ERROR)?;
+    let state = NonNull::new(swr_alloc()).ok_or(BACKEND_ERROR)?;
     let mut converter = Converter {
         state,
         input_rate,
@@ -186,11 +280,11 @@ fn prepare(
     ] {
         integer_option(state, name, value)?;
     }
-    if unsafe { ffi::av_opt_set_double(state.as_ptr().cast(), c"cutoff".as_ptr(), 1.0, 0) } < 0 {
+    if av_opt_set_double(state.as_ptr(), c"cutoff".as_ptr(), 1.0) < 0 {
         return Err(BACKEND_ERROR);
     }
-    if unsafe { ffi::swr_init(state.as_ptr()) } < 0
-        || unsafe { ffi::swr_set_compensation(state.as_ptr(), 1, COMPENSATION_DISTANCE) } < 0
+    if swr_init(state.as_ptr()) < 0
+        || swr_set_compensation(state.as_ptr(), 1, COMPENSATION_DISTANCE) < 0
     {
         return Err(BACKEND_ERROR);
     }
@@ -274,9 +368,7 @@ extern "C" fn process(
     let accepted = input_frames.min(converter.maximum_input.saturating_sub(converter.queued()));
     let delta = (f64::from(COMPENSATION_DISTANCE) * (1.0 - converter.nominal_ratio / ratio)).round()
         as c_int;
-    if unsafe { ffi::swr_set_compensation(converter.state.as_ptr(), delta, COMPENSATION_DISTANCE) }
-        < 0
-    {
+    if swr_set_compensation(converter.state.as_ptr(), delta, COMPENSATION_DISTANCE) < 0 {
         return BACKEND_ERROR;
     }
     // Nonnull planes with zero count drain ready PCM without an EOF flush.
@@ -287,15 +379,13 @@ extern "C" fn process(
     }
     .cast::<u8>();
     let output_plane = output.cast::<u8>();
-    let generated = unsafe {
-        ffi::swr_convert(
-            converter.state.as_ptr(),
-            &output_plane,
-            output_capacity as c_int,
-            &input_plane,
-            accepted as c_int,
-        )
-    };
+    let generated = swr_convert(
+        converter.state.as_ptr(),
+        &output_plane,
+        output_capacity as c_int,
+        &input_plane,
+        accepted as c_int,
+    );
     if generated < 0 {
         return BACKEND_ERROR;
     }
