@@ -30,6 +30,7 @@ const COMPENSATION_DISTANCE: c_int = 1_000_000;
 const FILTER_SIZE: usize = 16;
 
 #[cfg(test)]
+/// Backend failure points used only by deterministic unit tests.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum TestFailure {
     Zeroed,
@@ -44,10 +45,12 @@ enum TestFailure {
 
 #[cfg(test)]
 thread_local! {
+    /// Per-test backend failure injection, isolated across concurrent tests.
     static TEST_FAILURE: Cell<Option<TestFailure>> = const { Cell::new(None) };
 }
 
 #[cfg(test)]
+/// Consume a matching one-shot backend failure injected by a unit test.
 fn take_test_failure(failure: TestFailure) -> bool {
     TEST_FAILURE.with(|pending| {
         if pending.get() == Some(failure) {
@@ -74,18 +77,21 @@ macro_rules! fail_if_requested {
 }
 
 #[inline]
+/// Allocate a libswresample context or inject a test failure.
 fn swr_alloc() -> *mut ffi::SwrContext {
     fail_if_requested!(TestFailure::Allocate, ptr::null_mut());
     unsafe { ffi::swr_alloc() }
 }
 
 #[inline]
+/// Initialize a prepared libswresample context.
 fn swr_init(state: *mut ffi::SwrContext) -> c_int {
     fail_if_requested!(TestFailure::Initialize, -1);
     unsafe { ffi::swr_init(state) }
 }
 
 #[inline]
+/// Convert a bounded mono F32 slice through libswresample.
 fn swr_convert(
     state: *mut ffi::SwrContext,
     output: *const *mut u8,
@@ -98,24 +104,28 @@ fn swr_convert(
 }
 
 #[inline]
+/// Set gradual sample-rate compensation on the prepared context.
 fn swr_set_compensation(state: *mut ffi::SwrContext, delta: c_int, distance: c_int) -> c_int {
     fail_if_requested!(TestFailure::Compensation, -1);
     unsafe { ffi::swr_set_compensation(state, delta, distance) }
 }
 
 #[inline]
+/// Set a string-valued libswresample option.
 fn av_opt_set(state: *mut ffi::SwrContext, name: *const c_char, value: *const c_char) -> c_int {
     fail_if_requested!(TestFailure::Option, -1);
     unsafe { ffi::av_opt_set(state.cast(), name, value, 0) }
 }
 
 #[inline]
+/// Set an integer-valued libswresample option.
 fn av_opt_set_int(state: *mut ffi::SwrContext, name: *const c_char, value: i64) -> c_int {
     fail_if_requested!(TestFailure::IntegerOption, -1);
     unsafe { ffi::av_opt_set_int(state.cast(), name, value, 0) }
 }
 
 #[inline]
+/// Set a floating-point libswresample option.
 fn av_opt_set_double(state: *mut ffi::SwrContext, name: *const c_char, value: f64) -> c_int {
     fail_if_requested!(TestFailure::DoubleOption, -1);
     unsafe { ffi::av_opt_set_double(state.cast(), name, value, 0) }
