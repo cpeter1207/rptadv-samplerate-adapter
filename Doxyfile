@@ -1,5 +1,5 @@
 PROJECT_NAME = rptadv-samplerate-adapter
-PROJECT_BRIEF = libsamplerate adapter for rpt_advanced
+PROJECT_BRIEF = Prepared libswresample adapter for rpt_advanced
 INPUT = README.md include build/doxygen-input
 FILE_PATTERNS = *.h *.md *.dox
 RECURSIVE = YES

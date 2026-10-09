@@ -25,9 +25,13 @@ alter node configuration without explicit approval.
 
 Follow `rpt_advanced` ADR 0022. This is a separately versioned Rust `cdylib`
 with a narrow, stable C descriptor/function-table ABI. It dynamically links
-libsamplerate and exposes no libsamplerate types. Internal PCM is mono,
+libswresample and libavutil and exposes no FFmpeg types. Internal PCM is mono,
 normalized IEEE-754 binary32 from `-1.0` through `+1.0`.
 
-The persistent conversion operation is allocation-free, lock-free,
+ABI2 construction receives nominal input/output rates and maximum frame counts.
+Its fixed SWR filter uses size 16, cutoff 1.0, and a Kaiser window. Changes
+to independent-clock timing use soft compensation within 1000 ppm of nominal.
+
+The persistent conversion, reset, and queue-observation operations are allocation-free, lock-free,
 nonblocking, log-free, and panic-free after setup. The caller serializes use
 of an individual converter handle.

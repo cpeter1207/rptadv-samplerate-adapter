@@ -21,14 +21,15 @@ int main(void)
 	assert(descriptor != NULL);
 	assert(descriptor->abi_version == RPTADV_SAMPLERATE_ADAPTER_ABI_VERSION);
 	assert(descriptor->struct_size >=
-	       RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_V1_MIN_SIZE);
+	       RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_V2_MIN_SIZE);
 	assert(strcmp(descriptor->capability_name,
 		      RPTADV_SAMPLERATE_ADAPTER_CAPABILITY) == 0);
 	assert(descriptor->create != NULL);
 	assert(descriptor->reset != NULL);
 	assert(descriptor->process != NULL);
 	assert(descriptor->destroy != NULL);
-	assert(descriptor->create(RPTADV_SAMPLERATE_QUALITY_SINC_BEST, 1,
+	assert(descriptor->queued_input != NULL);
+	assert(descriptor->create(8000, 16000, 512, 1024,
 				  &converter) == RPTADV_SAMPLERATE_ADAPTER_OK);
 	assert(converter != NULL);
 	assert(descriptor->process(converter, input, 512, output, 1024, 2.0,

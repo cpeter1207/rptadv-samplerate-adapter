@@ -1,76 +1,443 @@
-//! Versioned, F32-only libsamplerate adapter for `rpt_advanced`.
+//! Versioned mono F32 resampling through a prepared libswresample context.
 //!
-//! The public C descriptor contains no libsamplerate types. A converter owns
-//! one persistent mono `SRC_STATE`; its `process` entry passes caller F32
-//! buffers directly to libsamplerate without a format conversion, allocation,
-//! lock, logging operation, or panic path in adapter code.
+//! Construction owns allocation and filter preparation. Streaming, queue
+//! observation, and burst reset retain the prepared buffers and filter bank.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod ffi;
 
-use std::ffi::{c_char, c_int, c_long};
+use std::ffi::{CStr, c_char, c_int};
 use std::mem::size_of;
 use std::ptr::{self, NonNull};
 
-/// ABI version exported by this adapter.
-const ABI_VERSION: u32 = 1;
-/// Stable name used to select this adapter capability.
-const CAPABILITY_NAME: &[u8] = b"rptadv.samplerate\0";
-/// libsamplerate accepts ratios through this inclusive lower bound.
-const MIN_RATIO: f64 = 1.0 / 256.0;
-/// libsamplerate accepts ratios through this inclusive upper bound.
-const MAX_RATIO: f64 = 256.0;
+#[cfg(test)]
+use std::cell::Cell;
 
-/// Successful adapter result.
+/// Descriptor ABI for explicit nominal rates and bounded setup.
+const ABI_VERSION: u32 = 2;
+/// Successful operation.
 const OK: c_int = 0;
-/// Invalid public pointer, ratio, frame count, quality, or channel request.
+/// Invalid pointer, count, rate, or correction.
 const INVALID_ARGUMENT: c_int = -1;
-/// libsamplerate failed the requested operation.
-const LIBSAMPLERATE_ERROR: c_int = -2;
-/// ABI v1 intentionally supports mono conversion only.
+/// Backend or control-plane allocation failure.
+const BACKEND_ERROR: c_int = -2;
+/// Rates or frame counts exceed the backend integer representation.
 const UNSUPPORTED: c_int = -3;
+/// Compensation duration in output frames; one unit resolves one ppm.
+const COMPENSATION_DISTANCE: c_int = 1_000_000;
+/// Fixed SWR Kaiser filter size used by each prepared converter.
+const FILTER_SIZE: usize = 16;
 
-/// Stable ABI value for the former highest-quality sinc selection.
-const SINC_BEST: c_int = 0;
-/// Stable ABI value for the former medium-quality sinc selection.
-const SINC_MEDIUM: c_int = 1;
-/// Stable ABI value for the former low-latency sinc selection.
-const SINC_FASTEST: c_int = 2;
-/// libsamplerate linear interpolation converter.
-const SRC_LINEAR: c_int = 4;
+#[cfg(test)]
+/// Backend failure points used only by deterministic unit tests.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TestFailure {
+    Zeroed,
+    Allocate,
+    Option,
+    IntegerOption,
+    DoubleOption,
+    Initialize,
+    Compensation,
+    Convert,
+}
 
-const _: () = assert!(SINC_BEST == 0);
-const _: () = assert!(SINC_MEDIUM == 1);
-const _: () = assert!(SINC_FASTEST == 2);
-const _: () = assert!(OK == 0);
-const _: () = assert!(INVALID_ARGUMENT == -1);
-const _: () = assert!(LIBSAMPLERATE_ERROR == -2);
-const _: () = assert!(UNSUPPORTED == -3);
+#[cfg(test)]
+thread_local! {
+    /// Per-test backend failure injection, isolated across concurrent tests.
+    static TEST_FAILURE: Cell<Option<TestFailure>> = const { Cell::new(None) };
+}
 
-/// Persistent, opaque libsamplerate converter represented by the C ABI.
-#[repr(C)]
+#[cfg(test)]
+/// Consume a matching one-shot backend failure injected by a unit test.
+fn take_test_failure(failure: TestFailure) -> bool {
+    TEST_FAILURE.with(|pending| {
+        if pending.get() == Some(failure) {
+            pending.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(test)]
+macro_rules! fail_if_requested {
+    ($failure:expr, $error:expr) => {
+        if take_test_failure($failure) {
+            return $error;
+        }
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! fail_if_requested {
+    ($failure:expr, $error:expr) => {};
+}
+
+#[inline]
+/// Allocate a libswresample context or inject a test failure.
+fn swr_alloc() -> *mut ffi::SwrContext {
+    fail_if_requested!(TestFailure::Allocate, ptr::null_mut());
+    unsafe { ffi::swr_alloc() }
+}
+
+#[inline]
+/// Initialize a prepared libswresample context.
+fn swr_init(state: *mut ffi::SwrContext) -> c_int {
+    fail_if_requested!(TestFailure::Initialize, -1);
+    unsafe { ffi::swr_init(state) }
+}
+
+#[inline]
+/// Convert a bounded mono F32 slice through libswresample.
+fn swr_convert(
+    state: *mut ffi::SwrContext,
+    output: *const *mut u8,
+    output_frames: c_int,
+    input: *const *const u8,
+    input_frames: c_int,
+) -> c_int {
+    fail_if_requested!(TestFailure::Convert, -1);
+    unsafe { ffi::swr_convert(state, output, output_frames, input, input_frames) }
+}
+
+#[inline]
+/// Set gradual sample-rate compensation on the prepared context.
+fn swr_set_compensation(state: *mut ffi::SwrContext, delta: c_int, distance: c_int) -> c_int {
+    fail_if_requested!(TestFailure::Compensation, -1);
+    unsafe { ffi::swr_set_compensation(state, delta, distance) }
+}
+
+#[inline]
+/// Set a string-valued libswresample option.
+fn av_opt_set(state: *mut ffi::SwrContext, name: *const c_char, value: *const c_char) -> c_int {
+    fail_if_requested!(TestFailure::Option, -1);
+    unsafe { ffi::av_opt_set(state.cast(), name, value, 0) }
+}
+
+#[inline]
+/// Set an integer-valued libswresample option.
+fn av_opt_set_int(state: *mut ffi::SwrContext, name: *const c_char, value: i64) -> c_int {
+    fail_if_requested!(TestFailure::IntegerOption, -1);
+    unsafe { ffi::av_opt_set_int(state.cast(), name, value, 0) }
+}
+
+#[inline]
+/// Set a floating-point libswresample option.
+fn av_opt_set_double(state: *mut ffi::SwrContext, name: *const c_char, value: f64) -> c_int {
+    fail_if_requested!(TestFailure::DoubleOption, -1);
+    unsafe { ffi::av_opt_set_double(state.cast(), name, value, 0) }
+}
+
+/// Exclusively owned, fully prepared mono resampler.
 pub struct Converter {
-    state: NonNull<ffi::SrcState>,
-    functions: &'static ffi::FunctionTable,
+    state: NonNull<ffi::SwrContext>,
+    input_rate: u32,
+    nominal_ratio: f64,
+    maximum_input: u32,
+    maximum_output: u32,
+    zeros: Vec<f32>,
+    discard: Vec<f32>,
+    baseline_delay: i64,
+    output_delay: u32,
 }
 
 impl Drop for Converter {
-    /// Release the persistent libsamplerate state owned by this converter.
+    /// Release native resources after the serialized caller has stopped.
     fn drop(&mut self) {
-        unsafe {
-            (self.functions.delete)(self.state.as_ptr());
-        }
+        let mut state = self.state.as_ptr();
+        unsafe { ffi::swr_free(&mut state) };
     }
 }
 
-/// Versioned descriptor exposed to C and adapter-neutral Rust consumers.
+impl Converter {
+    /// Convert into prepared discard storage without flushing the stream.
+    fn discard_conversion(&mut self, input_frames: usize) -> Result<c_int, c_int> {
+        let input = self.zeros.as_ptr().cast::<u8>();
+        let output = self.discard.as_mut_ptr().cast::<u8>();
+        let result = swr_convert(
+            self.state.as_ptr(),
+            &output,
+            self.maximum_output as c_int,
+            &input,
+            input_frames as c_int,
+        );
+        if result < 0 {
+            Err(BACKEND_ERROR)
+        } else {
+            Ok(result)
+        }
+    }
+
+    /// Drain only ready output, retaining the continuing-stream FIR lookahead.
+    fn drain_discard(&mut self) -> Result<(), c_int> {
+        while self.discard_conversion(0)? != 0 {}
+        Ok(())
+    }
+
+    /// Replace old PCM with silence without freeing state or changing phase.
+    fn clear_history(&mut self) -> Result<(), c_int> {
+        if swr_set_compensation(self.state.as_ptr(), 0, 0) < 0 {
+            return Err(BACKEND_ERROR);
+        }
+        self.drain_discard()?;
+        // Scrub the full prepared reserve: FIR-only zeroing can expose stale
+        // samples much later when compensation reaches another buffer region.
+        self.discard_conversion(self.zeros.len())?;
+        self.drain_discard()?;
+        self.baseline_delay =
+            unsafe { ffi::swr_get_delay(self.state.as_ptr(), i64::from(self.input_rate)) };
+        Ok(())
+    }
+
+    /// Additional input backlog beyond the warmed, empty FIR lookahead.
+    fn queued(&self) -> u32 {
+        let delay = unsafe { ffi::swr_get_delay(self.state.as_ptr(), i64::from(self.input_rate)) };
+        delay.saturating_sub(self.baseline_delay).max(0) as u32
+    }
+}
+
+/// Allocate zeroed control-plane storage with recoverable allocation failure.
+fn zeroed(length: usize) -> Result<Vec<f32>, c_int> {
+    fail_if_requested!(TestFailure::Zeroed, Err(BACKEND_ERROR));
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(length)
+        .map_err(|_| BACKEND_ERROR)?;
+    samples.resize(length, 0.0);
+    Ok(samples)
+}
+
+/// Apply one string-valued option while the context is uninitialized.
+fn option(state: NonNull<ffi::SwrContext>, name: &CStr, value: &CStr) -> Result<(), c_int> {
+    if av_opt_set(state.as_ptr(), name.as_ptr(), value.as_ptr()) < 0 {
+        Err(BACKEND_ERROR)
+    } else {
+        Ok(())
+    }
+}
+
+/// Apply one integer configuration option before initialization.
+fn integer_option(state: NonNull<ffi::SwrContext>, name: &CStr, value: i64) -> Result<(), c_int> {
+    if av_opt_set_int(state.as_ptr(), name.as_ptr(), value) < 0 {
+        Err(BACKEND_ERROR)
+    } else {
+        Ok(())
+    }
+}
+
+/// Build and warm the complete bounded converter before audio starts.
+fn prepare(
+    input_rate: u32,
+    output_rate: u32,
+    maximum_input: u32,
+    maximum_output: u32,
+) -> Result<Converter, c_int> {
+    if [input_rate, output_rate, maximum_input, maximum_output].contains(&0) {
+        return Err(INVALID_ARGUMENT);
+    }
+    if [input_rate, output_rate, maximum_input, maximum_output]
+        .iter()
+        .any(|value| *value > c_int::MAX as u32)
+    {
+        return Err(UNSUPPORTED);
+    }
+    let nominal_ratio = f64::from(output_rate) / f64::from(input_rate);
+    if !(1.0 / 256.0..=256.0).contains(&nominal_ratio) {
+        return Err(UNSUPPORTED);
+    }
+    // FFmpeg expands a downsampling FIR by its inverse cutoff. This
+    // conservative bound covers its even-length rounding and initial mirror.
+    let history = (FILTER_SIZE as f64 / (nominal_ratio * 0.985).min(1.0)).ceil() as usize + 4;
+    let warm_length = history
+        .checked_mul(4)
+        .and_then(|length| length.checked_add(maximum_input as usize * 2))
+        .filter(|length| *length <= c_int::MAX as usize)
+        .ok_or(UNSUPPORTED)?;
+    let zeros = zeroed(warm_length)?;
+    let discard = zeroed(maximum_output as usize)?;
+    let state = NonNull::new(swr_alloc()).ok_or(BACKEND_ERROR)?;
+    let mut converter = Converter {
+        state,
+        input_rate,
+        nominal_ratio,
+        maximum_input,
+        maximum_output,
+        zeros,
+        discard,
+        baseline_delay: 0,
+        output_delay: 0,
+    };
+    for (name, value) in [
+        (c"in_chlayout", c"mono"),
+        (c"out_chlayout", c"mono"),
+        (c"in_sample_fmt", c"flt"),
+        (c"out_sample_fmt", c"flt"),
+        (c"internal_sample_fmt", c"fltp"),
+        (c"resampler", c"swr"),
+    ] {
+        option(state, name, value)?;
+    }
+    for (name, value) in [
+        (c"in_sample_rate", i64::from(input_rate)),
+        (c"out_sample_rate", i64::from(output_rate)),
+        (c"filter_size", FILTER_SIZE as i64),
+        (c"filter_type", 2), // SWR_FILTER_TYPE_KAISER from FFmpeg's public enum.
+        (c"flags", 1),       // SWR_FLAG_RESAMPLE also enables equal-rate compensation.
+        (c"exact_rational", 0),
+    ] {
+        integer_option(state, name, value)?;
+    }
+    if av_opt_set_double(state.as_ptr(), c"cutoff".as_ptr(), 1.0) < 0 {
+        return Err(BACKEND_ERROR);
+    }
+    if swr_init(state.as_ptr()) < 0
+        || swr_set_compensation(state.as_ptr(), 1, COMPENSATION_DISTANCE) < 0
+    {
+        return Err(BACKEND_ERROR);
+    }
+    // The first warmup can use SWR's initial direct-input path. Repeat with
+    // established history to reserve the buffered path used by burst reset.
+    for _ in 0..2 {
+        converter.clear_history()?;
+    }
+    converter.output_delay =
+        unsafe { ffi::swr_get_delay(state.as_ptr(), i64::from(output_rate)) } as u32;
+    Ok(converter)
+}
+
+/// Allocate a prepared mono converter, leaving a null result on failure.
+extern "C" fn create(
+    input_rate: u32,
+    output_rate: u32,
+    maximum_input: u32,
+    maximum_output: u32,
+    output: *mut *mut Converter,
+) -> c_int {
+    let Some(output) = NonNull::new(output) else {
+        return INVALID_ARGUMENT;
+    };
+    unsafe { *output.as_ptr() = ptr::null_mut() };
+    match prepare(input_rate, output_rate, maximum_input, maximum_output) {
+        Ok(converter) => {
+            unsafe { *output.as_ptr() = Box::into_raw(Box::new(converter)) };
+            OK
+        }
+        Err(error) => error,
+    }
+}
+
+/// Clear the previous burst while retaining every prepared allocation.
+extern "C" fn reset(converter: *mut Converter) -> c_int {
+    let Some(mut converter) = NonNull::new(converter) else {
+        return INVALID_ARGUMENT;
+    };
+    unsafe { converter.as_mut() }
+        .clear_history()
+        .map_or_else(|error| error, |()| OK)
+}
+
+/// Convert bounded PCM with at most 1000 ppm correction about nominal rates.
+extern "C" fn process(
+    converter: *mut Converter,
+    input: *const f32,
+    input_frames: u32,
+    output: *mut f32,
+    output_capacity: u32,
+    ratio: f64,
+    out_input_used: *mut u32,
+    out_output_generated: *mut u32,
+) -> c_int {
+    let (Some(mut converter), Some(input_used), Some(output_generated)) = (
+        NonNull::new(converter),
+        NonNull::new(out_input_used),
+        NonNull::new(out_output_generated),
+    ) else {
+        return INVALID_ARGUMENT;
+    };
+    unsafe {
+        *input_used.as_ptr() = 0;
+        *output_generated.as_ptr() = 0;
+    }
+    let converter = unsafe { converter.as_mut() };
+    if !ratio.is_finite()
+        || ratio < converter.nominal_ratio * 0.999
+        || ratio > converter.nominal_ratio * 1.001
+        || input_frames > converter.maximum_input
+        || output_capacity > converter.maximum_output
+        || (input_frames != 0 && input.is_null())
+        || (output_capacity != 0 && output.is_null())
+    {
+        return INVALID_ARGUMENT;
+    }
+    if output_capacity == 0 {
+        return OK;
+    }
+    let accepted = input_frames.min(converter.maximum_input.saturating_sub(converter.queued()));
+    let delta = (f64::from(COMPENSATION_DISTANCE) * (1.0 - converter.nominal_ratio / ratio)).round()
+        as c_int;
+    if swr_set_compensation(converter.state.as_ptr(), delta, COMPENSATION_DISTANCE) < 0 {
+        return BACKEND_ERROR;
+    }
+    // Nonnull planes with zero count drain ready PCM without an EOF flush.
+    let input_plane = if accepted == 0 {
+        converter.zeros.as_ptr()
+    } else {
+        input
+    }
+    .cast::<u8>();
+    let output_plane = output.cast::<u8>();
+    let generated = swr_convert(
+        converter.state.as_ptr(),
+        &output_plane,
+        output_capacity as c_int,
+        &input_plane,
+        accepted as c_int,
+    );
+    if generated < 0 {
+        return BACKEND_ERROR;
+    }
+    unsafe {
+        *input_used.as_ptr() = accepted;
+        *output_generated.as_ptr() = generated as u32;
+    }
+    OK
+}
+
+/// Observe additional input backlog without counting intrinsic FIR lookahead.
+extern "C" fn queued_input(converter: *mut Converter, output: *mut u32) -> c_int {
+    let (Some(converter), Some(output)) = (NonNull::new(converter), NonNull::new(output)) else {
+        return INVALID_ARGUMENT;
+    };
+    unsafe { *output.as_ptr() = converter.as_ref().queued() };
+    OK
+}
+
+/// Intrinsic setup latency, rounded to the nearest output frame.
+extern "C" fn converter_output_delay(converter: *mut Converter, output: *mut u32) -> c_int {
+    let (Some(converter), Some(output)) = (NonNull::new(converter), NonNull::new(output)) else {
+        return INVALID_ARGUMENT;
+    };
+    unsafe { *output.as_ptr() = converter.as_ref().output_delay };
+    OK
+}
+
+/// Destroy one stopped converter; a null handle is a no-op.
+extern "C" fn destroy(converter: *mut Converter) {
+    if let Some(converter) = NonNull::new(converter) {
+        unsafe { drop(Box::from_raw(converter.as_ptr())) };
+    }
+}
+
+/// Stable C-compatible function table for the prepared converter capability.
 #[repr(C)]
 pub struct AdapterDescriptor {
     struct_size: u32,
     abi_version: u32,
     capability_name: *const c_char,
-    create: extern "C" fn(c_int, u32, *mut *mut Converter) -> c_int,
+    create: extern "C" fn(u32, u32, u32, u32, *mut *mut Converter) -> c_int,
     reset: extern "C" fn(*mut Converter) -> c_int,
     process: extern "C" fn(
         *mut Converter,
@@ -83,204 +450,30 @@ pub struct AdapterDescriptor {
         *mut u32,
     ) -> c_int,
     destroy: extern "C" fn(*mut Converter),
+    queued_input: extern "C" fn(*mut Converter, *mut u32) -> c_int,
+    converter_output_delay: extern "C" fn(*mut Converter, *mut u32) -> c_int,
 }
 
-// The descriptor is immutable process-lifetime data. Its raw C string pointer
-// and function pointers all refer to immutable static code or storage.
+// SAFETY: descriptor code and its capability string are immutable statics.
 unsafe impl Sync for AdapterDescriptor {}
 
-/// Map each stable ABI selector to libsamplerate's linear converter.
-fn converter_type(quality: c_int) -> Option<c_int> {
-    match quality {
-        SINC_BEST | SINC_MEDIUM | SINC_FASTEST => Some(SRC_LINEAR),
-        _ => None,
-    }
-}
-
-/// Return whether a conversion ratio is finite and supported by libsamplerate.
-fn valid_ratio(ratio: f64) -> bool {
-    ratio.is_finite() && (MIN_RATIO..=MAX_RATIO).contains(&ratio)
-}
-
-/// Create a converter through the supplied production or deterministic test bindings.
-fn create_with_functions(
-    functions: &'static ffi::FunctionTable,
-    quality: c_int,
-    channels: u32,
-    out_converter: *mut *mut Converter,
-) -> c_int {
-    let Some(out_converter) = NonNull::new(out_converter) else {
-        return INVALID_ARGUMENT;
-    };
-    unsafe {
-        *out_converter.as_ptr() = ptr::null_mut();
-    }
-    let Some(converter_type) = converter_type(quality) else {
-        return INVALID_ARGUMENT;
-    };
-    if channels != 1 {
-        return UNSUPPORTED;
-    }
-
-    let mut library_error = 0;
-    let state = unsafe { (functions.new)(converter_type, channels as c_int, &mut library_error) };
-    let Some(state) = NonNull::new(state) else {
-        return LIBSAMPLERATE_ERROR;
-    };
-    if library_error != 0 {
-        unsafe {
-            (functions.delete)(state.as_ptr());
-        }
-        return LIBSAMPLERATE_ERROR;
-    }
-
-    let converter = Box::new(Converter { state, functions });
-    unsafe {
-        *out_converter.as_ptr() = Box::into_raw(converter);
-    }
-    OK
-}
-
-/// One caller-owned F32 conversion request passed through the C ABI boundary.
-struct ProcessRequest {
-    converter: *mut Converter,
-    input: *const f32,
-    input_frames: u32,
-    output: *mut f32,
-    output_capacity: u32,
-    ratio: f64,
-    out_input_used: *mut u32,
-    out_output_generated: *mut u32,
-}
-
-/// Validate and execute one bounded conversion through the converter's bindings.
-fn process_with_functions(request: ProcessRequest) -> c_int {
-    let Some(converter) = NonNull::new(request.converter) else {
-        return INVALID_ARGUMENT;
-    };
-    let (Some(out_input_used), Some(out_output_generated)) = (
-        NonNull::new(request.out_input_used),
-        NonNull::new(request.out_output_generated),
-    ) else {
-        return INVALID_ARGUMENT;
-    };
-    unsafe {
-        *out_input_used.as_ptr() = 0;
-        *out_output_generated.as_ptr() = 0;
-    }
-    if !valid_ratio(request.ratio) {
-        return INVALID_ARGUMENT;
-    }
-    if (request.input_frames != 0 && request.input.is_null())
-        || (request.output_capacity != 0 && request.output.is_null())
-    {
-        return INVALID_ARGUMENT;
-    }
-    if request.input_frames == 0 || request.output_capacity == 0 {
-        return OK;
-    }
-
-    let converter = unsafe { converter.as_ref() };
-    let mut data = ffi::SrcData {
-        data_in: request.input,
-        data_out: request.output,
-        input_frames: request.input_frames as c_long,
-        output_frames: request.output_capacity as c_long,
-        input_frames_used: 0,
-        output_frames_gen: 0,
-        end_of_input: 0,
-        src_ratio: request.ratio,
-    };
-    let result = unsafe { (converter.functions.process)(converter.state.as_ptr(), &mut data) };
-    if result != 0
-        || data.input_frames_used < 0
-        || data.input_frames_used > data.input_frames
-        || data.output_frames_gen < 0
-        || data.output_frames_gen > data.output_frames
-    {
-        return LIBSAMPLERATE_ERROR;
-    }
-    unsafe {
-        *out_input_used.as_ptr() = data.input_frames_used as u32;
-        *out_output_generated.as_ptr() = data.output_frames_gen as u32;
-    }
-    OK
-}
-
-/// Create one converter for the exported production descriptor.
-extern "C" fn create(quality: c_int, channels: u32, out_converter: *mut *mut Converter) -> c_int {
-    create_with_functions(&ffi::PRODUCTION_FUNCTIONS, quality, channels, out_converter)
-}
-
-/// Reset one converter through the exported production descriptor.
-extern "C" fn reset(converter: *mut Converter) -> c_int {
-    let Some(converter) = NonNull::new(converter) else {
-        return INVALID_ARGUMENT;
-    };
-    let converter = unsafe { converter.as_ref() };
-    let result = unsafe { (converter.functions.reset)(converter.state.as_ptr()) };
-    if result == 0 { OK } else { LIBSAMPLERATE_ERROR }
-}
-
-/// Convert one F32 block through the exported production descriptor.
-extern "C" fn process(
-    converter: *mut Converter,
-    input: *const f32,
-    input_frames: u32,
-    output: *mut f32,
-    output_capacity: u32,
-    ratio: f64,
-    out_input_used: *mut u32,
-    out_output_generated: *mut u32,
-) -> c_int {
-    process_with_functions(ProcessRequest {
-        converter,
-        input,
-        input_frames,
-        output,
-        output_capacity,
-        ratio,
-        out_input_used,
-        out_output_generated,
-    })
-}
-
-/// Destroy one converter through the exported production descriptor.
-extern "C" fn destroy(converter: *mut Converter) {
-    let Some(converter) = NonNull::new(converter) else {
-        return;
-    };
-    unsafe {
-        drop(Box::from_raw(converter.as_ptr()));
-    }
-}
-
-/// Immutable ABI-v1 production descriptor retained for the process lifetime.
+/// Immutable process-lifetime ABI2 function table.
 static DESCRIPTOR: AdapterDescriptor = AdapterDescriptor {
     struct_size: size_of::<AdapterDescriptor>() as u32,
     abi_version: ABI_VERSION,
-    capability_name: CAPABILITY_NAME.as_ptr().cast::<c_char>(),
+    capability_name: c"rptadv.samplerate".as_ptr(),
     create,
     reset,
     process,
     destroy,
+    queued_input,
+    converter_output_delay,
 };
 
-/// Return the immutable function table for ABI version one.
+/// Obtain the adapter descriptor before creating any real-time owners.
 #[unsafe(no_mangle)]
 pub extern "C" fn rptadv_samplerate_adapter_descriptor() -> *const AdapterDescriptor {
     &DESCRIPTOR
-}
-
-#[cfg(test)]
-/// Create a converter through deterministic test bindings.
-pub(crate) fn create_with_test_functions(
-    functions: &'static ffi::FunctionTable,
-    quality: c_int,
-    channels: u32,
-    out_converter: *mut *mut Converter,
-) -> c_int {
-    create_with_functions(functions, quality, channels, out_converter)
 }
 
 #[cfg(test)]

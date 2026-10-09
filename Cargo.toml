@@ -1,10 +1,10 @@
 [package]
 name = "rptadv-samplerate-adapter"
-version = "0.1.0-alpha.3"
+version = "0.2.0-alpha.1"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-2.0-only"
-description = "libsamplerate adapter for rpt_advanced"
+description = "Prepared libswresample adapter for rpt_advanced"
 homepage = "https://github.com/cpeter1207/rptadv-samplerate-adapter"
 repository = "https://github.com/cpeter1207/rptadv-samplerate-adapter"
 publish = false

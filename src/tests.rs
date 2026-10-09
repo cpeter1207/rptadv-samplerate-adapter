@@ -1,477 +1,424 @@
-//! Deterministic unit tests using a fake libsamplerate function table.
+//! Real-adapter boundary validation and streaming partition regressions.
 
-use std::ffi::c_int;
-use std::ptr;
+use super::*;
 
-use super::{
-    AdapterDescriptor, Converter, INVALID_ARGUMENT, LIBSAMPLERATE_ERROR, OK, SINC_BEST,
-    SINC_FASTEST, SINC_MEDIUM, UNSUPPORTED, create_with_test_functions, destroy, process, reset,
-};
-use crate::ffi::{FunctionTable, SrcData, SrcState};
-
-#[repr(C)]
-struct FakeState {
-    quality: c_int,
-    channels: c_int,
-    reset_calls: u32,
-    process_calls: u32,
-    last_ratio: f64,
-    reset_error: c_int,
-    response: c_int,
-}
-
-unsafe extern "C" fn fake_new(quality: c_int, channels: c_int, error: *mut c_int) -> *mut SrcState {
-    if error.is_null() {
-        return ptr::null_mut();
+#[test]
+fn prepared_resampler_uses_16_tap_kaiser_filter_and_full_bandwidth_cutoff() {
+    unsafe extern "C" {
+        fn av_opt_get_double(
+            object: *mut std::ffi::c_void,
+            name: *const c_char,
+            flags: c_int,
+            value: *mut f64,
+        ) -> c_int;
+        fn av_opt_get_int(
+            object: *mut std::ffi::c_void,
+            name: *const c_char,
+            flags: c_int,
+            value: *mut i64,
+        ) -> c_int;
     }
-    unsafe {
-        *error = 0;
-    }
-    Box::into_raw(Box::new(FakeState {
-        quality,
-        channels,
-        reset_calls: 0,
-        process_calls: 0,
-        last_ratio: 0.0,
-        reset_error: 0,
-        response: 0,
-    }))
-    .cast::<SrcState>()
-}
-
-unsafe extern "C" fn fake_reset(state: *mut SrcState) -> c_int {
-    let Some(state) = (unsafe { state.cast::<FakeState>().as_mut() }) else {
-        return 1;
-    };
-    state.reset_calls += 1;
-    state.reset_error
-}
-
-unsafe extern "C" fn fake_process(state: *mut SrcState, data: *mut SrcData) -> c_int {
-    let (Some(state), Some(data)) = (
-        (unsafe { state.cast::<FakeState>().as_mut() }),
-        (unsafe { data.as_mut() }),
-    ) else {
-        return 1;
-    };
-    state.process_calls += 1;
-    state.last_ratio = data.src_ratio;
-    match state.response {
-        0 => {}
-        1 => return 22,
-        2 => {
-            data.input_frames_used = -1;
-            return 0;
-        }
-        3 => {
-            data.input_frames_used = data.input_frames + 1;
-            return 0;
-        }
-        4 => {
-            data.output_frames_gen = -1;
-            return 0;
-        }
-        5 => {
-            data.output_frames_gen = data.output_frames + 1;
-            return 0;
-        }
-        _ => return 23,
-    }
-    let frames = data.input_frames.min(data.output_frames);
-    if frames > 0 {
+    let converter = prepare(48000, 8000, 256, 256).unwrap();
+    let mut filter_size = 0;
+    assert_eq!(
         unsafe {
-            ptr::copy_nonoverlapping(data.data_in, data.data_out, frames as usize);
-        }
-    }
-    data.input_frames_used = frames;
-    data.output_frames_gen = frames;
-    0
-}
-
-unsafe extern "C" fn fake_delete(state: *mut SrcState) -> *mut SrcState {
-    if !state.is_null() {
+            av_opt_get_int(
+                converter.state.as_ptr().cast(),
+                c"filter_size".as_ptr(),
+                0,
+                &mut filter_size,
+            )
+        },
+        0
+    );
+    assert_eq!(filter_size, 16);
+    let mut cutoff = 0.0;
+    assert_eq!(
         unsafe {
-            drop(Box::from_raw(state.cast::<FakeState>()));
-        }
-    }
-    ptr::null_mut()
-}
-
-unsafe extern "C" fn fake_new_null(
-    _quality: c_int,
-    _channels: c_int,
-    error: *mut c_int,
-) -> *mut SrcState {
-    if !error.is_null() {
-        unsafe {
-            *error = 0;
-        }
-    }
-    ptr::null_mut()
-}
-
-unsafe extern "C" fn fake_new_with_error(
-    quality: c_int,
-    channels: c_int,
-    error: *mut c_int,
-) -> *mut SrcState {
-    if error.is_null() {
-        return ptr::null_mut();
-    }
-    let state = unsafe { fake_new(quality, channels, error) };
-    unsafe {
-        *error = 24;
-    }
-    state
-}
-
-static FAKE_FUNCTIONS: FunctionTable = FunctionTable {
-    new: fake_new,
-    reset: fake_reset,
-    process: fake_process,
-    delete: fake_delete,
-};
-
-static NULL_NEW_FUNCTIONS: FunctionTable = FunctionTable {
-    new: fake_new_null,
-    reset: fake_reset,
-    process: fake_process,
-    delete: fake_delete,
-};
-
-static ERROR_NEW_FUNCTIONS: FunctionTable = FunctionTable {
-    new: fake_new_with_error,
-    reset: fake_reset,
-    process: fake_process,
-    delete: fake_delete,
-};
-
-fn fake_converter(quality: c_int) -> *mut Converter {
-    let mut converter = ptr::null_mut();
-    assert_eq!(
-        create_with_test_functions(&FAKE_FUNCTIONS, quality, 1, &mut converter),
-        OK
+            av_opt_get_double(
+                converter.state.as_ptr().cast(),
+                c"cutoff".as_ptr(),
+                0,
+                &mut cutoff,
+            )
+        },
+        0
     );
-    assert!(!converter.is_null());
-    converter
+    assert_eq!(cutoff, 1.0);
 }
 
-fn fake_state(converter: &Converter) -> &FakeState {
-    unsafe { &*converter.state.as_ptr().cast::<FakeState>() }
-}
-
-fn fake_state_mut(converter: &mut Converter) -> &mut FakeState {
-    unsafe { &mut *converter.state.as_ptr().cast::<FakeState>() }
+fn handle() -> *mut Converter {
+    let mut value = ptr::null_mut();
+    assert_eq!(create(48000, 8000, 256, 256, &mut value), OK);
+    assert!(!value.is_null());
+    value
 }
 
 #[test]
-fn descriptor_identifies_abi_v1_and_complete_function_table() {
-    let descriptor = unsafe { &*super::rptadv_samplerate_adapter_descriptor() };
-    assert_eq!(descriptor.abi_version, 1);
-    assert!(descriptor.struct_size as usize >= std::mem::size_of::<AdapterDescriptor>());
-    assert_eq!(
-        unsafe { std::ffi::CStr::from_ptr(descriptor.capability_name) }.to_bytes(),
-        &super::CAPABILITY_NAME[..super::CAPABILITY_NAME.len() - 1]
-    );
-    let _ = descriptor.create;
-    let _ = descriptor.reset;
-    let _ = descriptor.process;
-    let _ = descriptor.destroy;
-}
-
-#[test]
-fn create_maps_all_supported_qualities_to_linear() {
-    for quality in [SINC_BEST, SINC_MEDIUM, SINC_FASTEST] {
-        let converter = fake_converter(quality);
-        let converter_ref = unsafe { &*converter };
-        assert_eq!(fake_state(converter_ref).quality, 4);
-        assert_eq!(fake_state(converter_ref).channels, 1);
-        destroy(converter);
+fn preparation_reports_each_backend_failure() {
+    for failure in [
+        TestFailure::Zeroed,
+        TestFailure::Allocate,
+        TestFailure::Option,
+        TestFailure::IntegerOption,
+        TestFailure::DoubleOption,
+        TestFailure::Initialize,
+        TestFailure::Compensation,
+    ] {
+        TEST_FAILURE.with(|pending| pending.set(Some(failure)));
+        assert_eq!(
+            prepare(48000, 8000, 256, 256).map(|_| ()),
+            Err(BACKEND_ERROR)
+        );
     }
 }
 
 #[test]
-fn create_rejects_bad_output_quality_and_nonmono_requests() {
-    let mut converter = ptr::null_mut();
-    assert_eq!(
-        create_with_test_functions(&FAKE_FUNCTIONS, SINC_BEST, 1, ptr::null_mut()),
-        INVALID_ARGUMENT
-    );
-    assert_eq!(
-        create_with_test_functions(&FAKE_FUNCTIONS, 99, 1, &mut converter),
-        INVALID_ARGUMENT
-    );
-    assert_eq!(
-        create_with_test_functions(&FAKE_FUNCTIONS, SINC_BEST, 2, &mut converter),
-        UNSUPPORTED
-    );
-    assert!(converter.is_null());
-}
+fn reset_and_processing_report_backend_failures() {
+    let value = handle();
+    TEST_FAILURE.with(|pending| pending.set(Some(TestFailure::Compensation)));
+    assert_eq!(reset(value), BACKEND_ERROR);
+    destroy(value);
 
-#[test]
-fn create_translates_null_and_library_error_states() {
-    let mut converter = ptr::null_mut();
-    assert_eq!(
-        create_with_test_functions(&NULL_NEW_FUNCTIONS, SINC_BEST, 1, &mut converter),
-        LIBSAMPLERATE_ERROR
-    );
-    assert!(converter.is_null());
-    assert_eq!(
-        create_with_test_functions(&ERROR_NEW_FUNCTIONS, SINC_BEST, 1, &mut converter),
-        LIBSAMPLERATE_ERROR
-    );
-    assert!(converter.is_null());
-}
+    let value = handle();
+    TEST_FAILURE.with(|pending| pending.set(Some(TestFailure::Convert)));
+    assert_eq!(reset(value), BACKEND_ERROR);
+    destroy(value);
 
-#[test]
-fn process_passes_f32_samples_and_arbitrary_block_sizes_directly() {
-    let converter = fake_converter(SINC_BEST);
-    let input = [-1.0, -0.25, 0.0, 0.75, 1.0];
-    let mut output = [9.0; 7];
-    let mut input_used = 0;
-    let mut output_generated = 0;
-
+    let value = handle();
+    let input = [0.25; 8];
+    let mut output = [0.0; 8];
+    let (mut used, mut generated) = (0, 0);
+    TEST_FAILURE.with(|pending| pending.set(Some(TestFailure::Compensation)));
     assert_eq!(
         process(
-            converter,
+            value,
             input.as_ptr(),
             input.len() as u32,
             output.as_mut_ptr(),
             output.len() as u32,
-            1.5,
-            &mut input_used,
-            &mut output_generated,
+            1.0 / 6.0,
+            &mut used,
+            &mut generated,
         ),
-        OK
+        BACKEND_ERROR
     );
-    assert_eq!(input_used, input.len() as u32);
-    assert_eq!(output_generated, input.len() as u32);
-    assert_eq!(&output[..input.len()], &input);
-    let converter_ref = unsafe { &*converter };
-    assert_eq!(fake_state(converter_ref).process_calls, 1);
-    assert_eq!(fake_state(converter_ref).last_ratio, 1.5);
-    destroy(converter);
+
+    TEST_FAILURE.with(|pending| pending.set(Some(TestFailure::Convert)));
+    assert_eq!(
+        process(
+            value,
+            input.as_ptr(),
+            input.len() as u32,
+            output.as_mut_ptr(),
+            output.len() as u32,
+            1.0 / 6.0,
+            &mut used,
+            &mut generated,
+        ),
+        BACKEND_ERROR
+    );
+    destroy(value);
 }
 
 #[test]
-fn process_accepts_empty_blocks_without_calling_the_external_library() {
-    let converter = fake_converter(SINC_BEST);
-    let mut input_used = 99;
-    let mut output_generated = 99;
+fn reset_discards_ready_output_without_flushing_the_stream() {
+    let value = handle();
+    let input = [0.25; 256];
+    let mut output = [0.0; 1];
+    let (mut used, mut generated) = (0, 0);
     assert_eq!(
         process(
-            converter,
-            ptr::null(),
-            0,
-            ptr::null_mut(),
-            0,
-            1.0,
-            &mut input_used,
-            &mut output_generated,
-        ),
-        OK
-    );
-    assert_eq!((input_used, output_generated), (0, 0));
-    assert_eq!(fake_state(unsafe { &*converter }).process_calls, 0);
-
-    let input = [0.0];
-    let mut output = [0.0];
-    assert_eq!(
-        process(
-            converter,
+            value,
             input.as_ptr(),
-            1,
-            ptr::null_mut(),
-            0,
-            1.0,
-            &mut input_used,
-            &mut output_generated,
-        ),
-        OK
-    );
-    assert_eq!(
-        process(
-            converter,
-            ptr::null(),
-            0,
+            input.len() as u32,
             output.as_mut_ptr(),
-            1,
-            1.0,
-            &mut input_used,
-            &mut output_generated,
+            output.len() as u32,
+            1.0 / 6.0,
+            &mut used,
+            &mut generated,
         ),
         OK
     );
-    destroy(converter);
+    assert_eq!(generated, 1);
+    assert_eq!(reset(value), OK);
+    destroy(value);
 }
 
 #[test]
-fn process_rejects_bad_arguments_and_preserves_zeroed_progress_outputs() {
-    let converter = fake_converter(SINC_BEST);
-    let input = [0.0];
-    let mut output = [0.0];
-    let mut input_used = 99;
-    let mut output_generated = 99;
-
-    assert_eq!(
-        process(
-            converter,
-            input.as_ptr(),
-            1,
-            output.as_mut_ptr(),
-            1,
-            257.0,
-            &mut input_used,
-            &mut output_generated,
-        ),
-        INVALID_ARGUMENT
-    );
-    assert_eq!(
-        process(
-            converter,
-            input.as_ptr(),
-            1,
-            output.as_mut_ptr(),
-            1,
-            f64::NAN,
-            &mut input_used,
-            &mut output_generated,
-        ),
-        INVALID_ARGUMENT
-    );
-    assert_eq!((input_used, output_generated), (0, 0));
-    assert_eq!(
-        process(
-            converter,
-            ptr::null(),
-            1,
-            output.as_mut_ptr(),
-            1,
-            1.0,
-            &mut input_used,
-            &mut output_generated,
-        ),
-        INVALID_ARGUMENT
-    );
-    assert_eq!(
-        process(
-            converter,
-            input.as_ptr(),
-            1,
-            ptr::null_mut(),
-            1,
-            1.0,
-            &mut input_used,
-            &mut output_generated,
-        ),
-        INVALID_ARGUMENT
-    );
-    assert_eq!(
-        process(
-            converter,
-            input.as_ptr(),
-            1,
-            output.as_mut_ptr(),
-            1,
-            1.0,
-            ptr::null_mut(),
-            &mut output_generated,
-        ),
-        INVALID_ARGUMENT
-    );
-    assert_eq!(
-        process(
-            converter,
-            input.as_ptr(),
-            1,
-            output.as_mut_ptr(),
-            1,
-            1.0,
-            &mut input_used,
-            ptr::null_mut(),
-        ),
-        INVALID_ARGUMENT
-    );
-    assert_eq!(
-        process(
-            ptr::null_mut(),
-            input.as_ptr(),
-            1,
-            output.as_mut_ptr(),
-            1,
-            1.0,
-            &mut input_used,
-            &mut output_generated,
-        ),
-        INVALID_ARGUMENT
-    );
-    destroy(converter);
+fn descriptor_is_available_before_converter_creation() {
+    assert!(!rptadv_samplerate_adapter_descriptor().is_null());
 }
 
 #[test]
-fn reset_and_library_failures_are_translated_without_runtime_fallbacks() {
-    let converter = fake_converter(SINC_BEST);
-    assert_eq!(reset(converter), OK);
-    assert_eq!(fake_state(unsafe { &*converter }).reset_calls, 1);
-
-    let input = [0.25];
-    let mut output = [0.0];
-    let mut input_used = 99;
-    let mut output_generated = 99;
-    for response in 1..=5 {
-        unsafe {
-            fake_state_mut(&mut *converter).response = response;
-        }
+fn constructor_rejects_unrepresentable_setup_and_clears_output() {
+    assert_eq!(
+        create(48000, 8000, 256, 256, ptr::null_mut()),
+        INVALID_ARGUMENT
+    );
+    for parameters in [
+        (0, 8000, 256, 256),
+        (48000, 0, 256, 256),
+        (48000, 8000, 0, 256),
+        (48000, 8000, 256, 0),
+    ] {
+        let mut value = ptr::dangling_mut();
         assert_eq!(
-            process(
-                converter,
-                input.as_ptr(),
-                1,
-                output.as_mut_ptr(),
-                1,
-                1.0,
-                &mut input_used,
-                &mut output_generated,
+            create(
+                parameters.0,
+                parameters.1,
+                parameters.2,
+                parameters.3,
+                &mut value
             ),
-            LIBSAMPLERATE_ERROR
+            INVALID_ARGUMENT
         );
-        assert_eq!((input_used, output_generated), (0, 0));
+        assert!(value.is_null());
     }
-    unsafe {
-        fake_state_mut(&mut *converter).reset_error = 25;
+    for parameters in [
+        (u32::MAX, 8000, 256, 256),
+        (48000, u32::MAX, 256, 256),
+        (48000, 8000, u32::MAX, 256),
+        (48000, 8000, 256, u32::MAX),
+        (1, 257, 256, 256),
+        (257, 1, 256, 256),
+        (48000, 8000, c_int::MAX as u32, 256),
+    ] {
+        let mut value = ptr::dangling_mut();
+        assert_eq!(
+            create(
+                parameters.0,
+                parameters.1,
+                parameters.2,
+                parameters.3,
+                &mut value
+            ),
+            UNSUPPORTED
+        );
+        assert!(value.is_null());
     }
-    assert_eq!(reset(converter), LIBSAMPLERATE_ERROR);
+    assert_eq!(zeroed(usize::MAX), Err(BACKEND_ERROR));
+}
+
+#[test]
+fn null_lifecycle_and_observation_pointers_fail_safely() {
+    let value = handle();
+    let mut queued = 42;
     assert_eq!(reset(ptr::null_mut()), INVALID_ARGUMENT);
-    destroy(converter);
+    assert_eq!(queued_input(ptr::null_mut(), &mut queued), INVALID_ARGUMENT);
+    assert_eq!(queued_input(value, ptr::null_mut()), INVALID_ARGUMENT);
+    assert_eq!(
+        converter_output_delay(ptr::null_mut(), &mut queued),
+        INVALID_ARGUMENT
+    );
+    assert_eq!(
+        converter_output_delay(value, ptr::null_mut()),
+        INVALID_ARGUMENT
+    );
+    assert_eq!(converter_output_delay(value, &mut queued), OK);
+    assert!(queued > 0);
+    assert_eq!(reset(value), OK);
+    destroy(value);
     destroy(ptr::null_mut());
 }
 
 #[test]
-fn production_descriptor_uses_the_real_dynamic_libsamplerate_backend() {
-    let descriptor = unsafe { &*super::rptadv_samplerate_adapter_descriptor() };
-    let mut converter = ptr::null_mut();
-    let input = [0.0; 512];
-    let mut output = [0.0; 1024];
-    let mut input_used = 0;
-    let mut output_generated = 0;
-
-    assert_eq!((descriptor.create)(SINC_BEST, 1, &mut converter), OK);
-    assert!(!converter.is_null());
+fn invalid_process_requests_return_no_counts_or_buffer_writes() {
+    let value = handle();
+    let input = [0.5; 257];
+    let mut output = [42.0; 257];
+    for (input_pointer, input_count, output_null, output_count, ratio) in [
+        (ptr::null(), 1, false, 256, 1.0 / 6.0),
+        (input.as_ptr(), 1, true, 1, 1.0 / 6.0),
+        (input.as_ptr(), 257, false, 256, 1.0 / 6.0),
+        (input.as_ptr(), 256, false, 257, 1.0 / 6.0),
+        (input.as_ptr(), 256, false, 256, f64::NAN),
+        (input.as_ptr(), 256, false, 256, f64::INFINITY),
+        (input.as_ptr(), 256, false, 256, 0.998 / 6.0),
+        (input.as_ptr(), 256, false, 256, 1.002 / 6.0),
+    ] {
+        let (mut used, mut generated) = (42, 42);
+        let destination = if output_null {
+            ptr::null_mut()
+        } else {
+            output.as_mut_ptr()
+        };
+        assert_eq!(
+            process(
+                value,
+                input_pointer,
+                input_count,
+                destination,
+                output_count,
+                ratio,
+                &mut used,
+                &mut generated
+            ),
+            INVALID_ARGUMENT
+        );
+        assert_eq!((used, generated), (0, 0));
+        assert_eq!(output, [42.0; 257]);
+    }
+    let (mut used, mut generated) = (0, 0);
     assert_eq!(
-        (descriptor.process)(
-            converter,
+        process(
+            ptr::null_mut(),
             input.as_ptr(),
-            input.len() as u32,
+            1,
             output.as_mut_ptr(),
-            output.len() as u32,
-            2.0,
-            &mut input_used,
-            &mut output_generated,
+            1,
+            1.0 / 6.0,
+            &mut used,
+            &mut generated
+        ),
+        INVALID_ARGUMENT
+    );
+    assert_eq!(
+        process(
+            value,
+            input.as_ptr(),
+            1,
+            output.as_mut_ptr(),
+            1,
+            1.0 / 6.0,
+            ptr::null_mut(),
+            &mut generated
+        ),
+        INVALID_ARGUMENT
+    );
+    assert_eq!(
+        process(
+            value,
+            input.as_ptr(),
+            1,
+            output.as_mut_ptr(),
+            1,
+            1.0 / 6.0,
+            &mut used,
+            ptr::null_mut()
+        ),
+        INVALID_ARGUMENT
+    );
+    destroy(value);
+}
+
+#[test]
+fn zero_output_does_not_accept_input_and_queue_remains_bounded() {
+    let value = handle();
+    let input = [0.5; 256];
+    let mut output = [0.0; 1];
+    let (mut used, mut generated, mut queued) = (42, 42, 42);
+    assert_eq!(
+        process(
+            value,
+            input.as_ptr(),
+            256,
+            ptr::null_mut(),
+            0,
+            1.0 / 6.0,
+            &mut used,
+            &mut generated
         ),
         OK
     );
-    assert!(input_used <= input.len() as u32);
-    assert!(output_generated <= output.len() as u32);
-    assert_eq!((descriptor.reset)(converter), OK);
-    (descriptor.destroy)(converter);
+    assert_eq!((used, generated), (0, 0));
+    for _ in 0..1000 {
+        assert_eq!(
+            process(
+                value,
+                input.as_ptr(),
+                256,
+                output.as_mut_ptr(),
+                1,
+                1.0 / 6.0,
+                &mut used,
+                &mut generated
+            ),
+            OK
+        );
+        assert!(used <= 256 && generated <= 1);
+        assert_eq!(queued_input(value, &mut queued), OK);
+        assert!(queued <= 256);
+    }
+    assert_eq!(reset(value), OK);
+    assert_eq!(queued_input(value, &mut queued), OK);
+    assert_eq!(queued, 0);
+    assert_eq!(
+        process(
+            value,
+            ptr::null(),
+            0,
+            output.as_mut_ptr(),
+            1,
+            1.0 / 6.0,
+            &mut used,
+            &mut generated
+        ),
+        OK
+    );
+    assert_eq!((used, generated), (0, 0));
+    destroy(value);
+}
+
+fn render_partition(input: &[f32], block: usize, capacity: usize) -> Vec<f32> {
+    let value = handle();
+    let mut result = Vec::new();
+    let mut output = [0.0; 256];
+    for chunk in input.chunks(block) {
+        let mut offset = 0;
+        while offset < chunk.len() {
+            let (mut used, mut generated) = (0, 0);
+            assert_eq!(
+                process(
+                    value,
+                    chunk[offset..].as_ptr(),
+                    (chunk.len() - offset) as u32,
+                    output.as_mut_ptr(),
+                    capacity as u32,
+                    1.0 / 6.0,
+                    &mut used,
+                    &mut generated
+                ),
+                OK
+            );
+            assert!(used != 0 || generated != 0);
+            offset += used as usize;
+            result.extend_from_slice(&output[..generated as usize]);
+        }
+    }
+    loop {
+        let (mut used, mut generated) = (0, 0);
+        assert_eq!(
+            process(
+                value,
+                ptr::null(),
+                0,
+                output.as_mut_ptr(),
+                capacity as u32,
+                1.0 / 6.0,
+                &mut used,
+                &mut generated
+            ),
+            OK
+        );
+        assert_eq!(used, 0);
+        result.extend_from_slice(&output[..generated as usize]);
+        if generated == 0 {
+            break;
+        }
+    }
+    destroy(value);
+    result
+}
+
+#[test]
+fn asymmetric_partitions_produce_identical_pcm_and_counts() {
+    let input: Vec<_> = (0..12000)
+        .map(|index| (index as f32 * 0.09).sin() * 0.5)
+        .collect();
+    let expected = render_partition(&input, 256, 256);
+    assert_eq!(expected.len(), 2000);
+    for (block, output) in [(1, 1), (7, 17), (256, 1), (17, 256)] {
+        assert_eq!(render_partition(&input, block, output), expected);
+    }
 }

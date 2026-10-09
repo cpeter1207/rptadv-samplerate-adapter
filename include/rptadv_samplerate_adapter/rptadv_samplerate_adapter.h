@@ -1,12 +1,11 @@
 /**
  * @file rptadv_samplerate_adapter.h
- * @brief Stable C ABI for rpt_advanced's libsamplerate adapter.
+ * @brief ABI2 for prepared, bounded mono F32 sample-rate conversion.
  *
- * This adapter owns libsamplerate's ABI and persistent converter state. Its
- * public operation accepts and produces mono, normalized IEEE-754 binary32
- * PCM in the inclusive nominal full-scale range -1.0 through +1.0.
+ * PCM uses normalized IEEE-754 binary32, nominally -1.0 through +1.0.
+ * Each handle has one serialized owner. Creation and destruction are control
+ * operations; processing, reset, and queue observation retain prepared storage.
  */
-
 #ifndef RPTADV_SAMPLERATE_ADAPTER_H
 #define RPTADV_SAMPLERATE_ADAPTER_H
 
@@ -17,177 +16,110 @@
 extern "C" {
 #endif
 
-/** @brief ABI implemented by this adapter descriptor. */
-#define RPTADV_SAMPLERATE_ADAPTER_ABI_VERSION 1U
-
-/** @brief Stable capability string exported by the ABI-v1 descriptor. */
+/** Descriptor ABI; incompatible ABI1 providers must be rejected. */
+#define RPTADV_SAMPLERATE_ADAPTER_ABI_VERSION 2U
+/** Stable capability name, independent of the backend implementation. */
 #define RPTADV_SAMPLERATE_ADAPTER_CAPABILITY "rptadv.samplerate"
 
-/** @brief Opaque persistent libsamplerate converter state. */
+/** Exclusively owned, opaque prepared converter. */
 struct rptadv_samplerate_converter;
 
-/** @brief Result returned by an adapter operation. */
+/** Result codes have the platform C-int representation. */
 enum rptadv_samplerate_adapter_result {
-	/** Operation completed. */
-	RPTADV_SAMPLERATE_ADAPTER_OK = 0,
-	/** A required pointer, converter, channel count, ratio, or frame count was invalid. */
-	RPTADV_SAMPLERATE_ADAPTER_INVALID_ARGUMENT = -1,
-	/** libsamplerate rejected or failed the requested operation. */
-	RPTADV_SAMPLERATE_ADAPTER_LIBSAMPLERATE_ERROR = -2,
-	/** The requested adapter capability is not implemented. */
-	RPTADV_SAMPLERATE_ADAPTER_UNSUPPORTED = -3,
+	RPTADV_SAMPLERATE_ADAPTER_OK = 0, /**< Operation completed. */
+	RPTADV_SAMPLERATE_ADAPTER_INVALID_ARGUMENT = -1, /**< Invalid pointer or value. */
+	RPTADV_SAMPLERATE_ADAPTER_BACKEND_ERROR = -2, /**< Backend or allocation failure. */
+	RPTADV_SAMPLERATE_ADAPTER_UNSUPPORTED = -3, /**< Unsupported rate or frame bound. */
 };
 
-/** @brief Stable accepted selectors; each currently selects SRC_LINEAR. */
-enum rptadv_samplerate_quality {
-	/** Former highest-quality selector, retained for ABI compatibility. */
-	RPTADV_SAMPLERATE_QUALITY_SINC_BEST = 0,
-	/** Former medium-quality selector, retained for ABI compatibility. */
-	RPTADV_SAMPLERATE_QUALITY_SINC_MEDIUM = 1,
-	/** Former low-latency selector, retained for ABI compatibility. */
-	RPTADV_SAMPLERATE_QUALITY_SINC_FASTEST = 2,
-};
-
-/**
- * @brief Versioned function table exported by the adapter shared object.
- *
- * A caller obtains this immutable descriptor through
- * @ref rptadv_samplerate_adapter_descriptor and verifies @c abi_version,
- * the capability string, @c struct_size (at least
- * @ref RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_V1_MIN_SIZE), and every required
- * function pointer before use. Lifecycle calls are
- * control-plane operations. @ref process is the bounded real-time operation:
- * it does not allocate, lock, block, log, or intentionally panic.
- */
+/** Immutable process-lifetime capability descriptor. */
 struct rptadv_samplerate_adapter_descriptor {
-	/** Size of this descriptor, enabling compatible future extension. */
-	uint32_t struct_size;
-	/** ABI implemented by every function in this table. */
-	uint32_t abi_version;
-	/** Stable adapter capability name. */
-	const char *capability_name;
+	uint32_t struct_size; /**< Readable descriptor size. */
+	uint32_t abi_version; /**< ABI implemented by all functions. */
+	const char *capability_name; /**< Stable capability identifier. */
 	/**
-	 * @brief Create one persistent mono converter.
-	 *
-	 * @param quality One @ref rptadv_samplerate_quality value.
-	 * @param channels Required to be one; multichannel conversion is not part of ABI v1.
-	 * @param out_converter Destination for the newly owned converter on success.
-	 * @return One @ref rptadv_samplerate_adapter_result value.
-	 *
-	 * The caller must serialize all future operations on the returned handle.
+	 * Prepare one mono converter with fixed nominal rates and call bounds.
+	 * @param input_rate_hz Nominal source rate, positive and at most INT_MAX.
+	 * @param output_rate_hz Nominal destination rate, positive and at most INT_MAX.
+	 * @param maximum_input_frames Maximum input count per process call.
+	 * @param maximum_output_frames Maximum output capacity per process call.
+	 * @param out_converter Owned handle on success; null on failure.
+	 * @return An adapter result. Nominal ratios range from 1/256 through 256.
+	 * Frame bounds must be positive and representable by the backend. Setup
+	 * allocates storage and warms the selected SWR Kaiser filter: size 16,
+	 * cutoff 1.0. There is no variable quality or multichannel selector.
 	 */
-	enum rptadv_samplerate_adapter_result (*create)(
-		enum rptadv_samplerate_quality quality, uint32_t channels,
+	enum rptadv_samplerate_adapter_result (*create)(uint32_t input_rate_hz,
+		uint32_t output_rate_hz, uint32_t maximum_input_frames,
+		uint32_t maximum_output_frames,
 		struct rptadv_samplerate_converter **out_converter);
 	/**
-	 * @brief Discard persistent filter history without changing converter type.
-	 *
-	 * @param converter Converter obtained from @ref create.
-	 * @return One @ref rptadv_samplerate_adapter_result value.
+	 * Discard an ended burst and correction without allocation or stale audio.
+	 * @param converter Owned prepared converter.
+	 * @return An adapter result.
+	 * The bounded operation feeds and discards prepared silence to replace old
+	 * FIR history. It retains fractional phase and intrinsic filter latency.
 	 */
-	enum rptadv_samplerate_adapter_result (*reset)(
-		struct rptadv_samplerate_converter *converter);
+	enum rptadv_samplerate_adapter_result (*reset)(struct rptadv_samplerate_converter *converter);
 	/**
-	 * @brief Convert one bounded portion of a persistent mono PCM stream.
-	 *
-	 * @param converter Converter obtained from @ref create.
-	 * @param input Input PCM, required when @p input_frames is nonzero.
-	 * @param input_frames Available input frames. One frame is one F32 sample.
-	 * @param output Output PCM, required when @p output_capacity is nonzero.
-	 * @param output_capacity Available output frames. One frame is one F32 sample.
-	 * @param ratio Requested output-frame / input-frame ratio, from 1/256 through 256.
-	 * @param out_input_used Required destination for the number of consumed input frames.
-	 * @param out_output_generated Required destination for the number of generated output frames.
-	 * @return One @ref rptadv_samplerate_adapter_result value.
-	 *
-	 * The operation accepts any bounded input and output block sizes. A
-	 * successful call may consume or generate zero frames while the persistent
-	 * converter gathers history. Callers resubmit the unconsumed tail on the
-	 * next call. Input and output buffers must not overlap. ABI v1 represents a
-	 * continuing stream only; it deliberately has no end-of-input tail flush.
+	 * Convert a bounded portion of a continuing stream without allocation.
+	 * @param converter Owned prepared converter.
+	 * @param input Disjoint mono F32 input; may be null only for zero frames.
+	 * @param input_frames Available input, within the configured maximum.
+	 * @param output Disjoint output; may be null only for zero capacity.
+	 * @param output_capacity Output capacity, within the configured maximum.
+	 * @param ratio Output/input ratio within nominal * [0.999, 1.001].
+	 * @param out_input_used Accepted input prefix, including internally queued PCM.
+	 * @param out_output_generated Actual samples written, without final-tail padding.
+	 * @return An adapter result.
+	 * Resubmit the unaccepted input tail. Zero input drains available output;
+	 * zero output capacity is a no-op. This interface never flushes EOF.
+	 * Startup/reset history is zero-extended; intrinsic FIR latency remains.
+	 * Validation failures leave the two output counts zero when their pointers
+	 * and converter are valid. A backend failure requires a successful reset.
 	 */
-	enum rptadv_samplerate_adapter_result (*process)(
-		struct rptadv_samplerate_converter *converter, const float *input,
-		uint32_t input_frames, float *output, uint32_t output_capacity,
-		double ratio, uint32_t *out_input_used,
+	enum rptadv_samplerate_adapter_result (*process)(struct rptadv_samplerate_converter *converter,
+		const float *input, uint32_t input_frames, float *output,
+		uint32_t output_capacity, double ratio, uint32_t *out_input_used,
 		uint32_t *out_output_generated);
-	/**
-	 * @brief Destroy a converter after all callers have stopped using it.
-	 *
-	 * @param converter Converter obtained from @ref create, or null.
-	 */
+	/** Destroy a stopped converter; null is allowed. */
 	void (*destroy)(struct rptadv_samplerate_converter *converter);
+	/**
+	 * Observe queued input beyond intrinsic FIR lookahead, without allocation.
+	 * @param converter Owned prepared converter.
+	 * @param out_frames Additional input-domain backlog, rounded to whole frames.
+	 * @return An adapter result. This excludes the warmed filter delay and can
+	 * differ by one input frame with fractional phase; it is not a sample tag.
+	 */
+	enum rptadv_samplerate_adapter_result (*queued_input)(struct rptadv_samplerate_converter *converter,
+		uint32_t *out_frames);
+	/**
+	 * Obtain intrinsic setup delay, rounded to the nearest output frame.
+	 * @param converter Owned prepared converter.
+	 * @param out_frames Immutable warmed delay for finite-media prefix trimming.
+	 * @return An adapter result. Excludes queue backlog and PLC. Streaming
+	 * compensation and burst reset may retain a different fractional phase;
+	 * this reports the nominal delay measured at construction.
+	 */
+	enum rptadv_samplerate_adapter_result (*converter_output_delay)(struct rptadv_samplerate_converter *converter,
+		uint32_t *out_frames);
 };
 
-/**
- * @brief Minimum readable size of an ABI-v1 descriptor.
- *
- * Consumers must require @c struct_size to be at least this value, rather
- * than requiring equality, so a newer provider can append fields without
- * changing the ABI-v1 prefix.
- */
-#define RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_V1_MIN_SIZE \
-	(offsetof(struct rptadv_samplerate_adapter_descriptor, destroy) + \
-	 sizeof(((struct rptadv_samplerate_adapter_descriptor *)0)->destroy))
+/** Minimum readable ABI2 descriptor prefix. */
+#define RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_V2_MIN_SIZE \
+	(offsetof(struct rptadv_samplerate_adapter_descriptor, converter_output_delay) + \
+	 sizeof(((struct rptadv_samplerate_adapter_descriptor *)0)->converter_output_delay))
 
-/*
- * C function parameters are ABI-sensitive. Reject compilation modes such as
- * -fshort-enums that would make these public enum parameters incompatible
- * with Rust's C-int ABI. C11 and C++11 consumers receive the check directly;
- * older language modes retain the documented int-sized ABI requirement.
- */
 #if defined(__cplusplus)
-static_assert(sizeof(enum rptadv_samplerate_adapter_result) == sizeof(int),
-	      "adapter result enum must use the C int ABI");
-static_assert(sizeof(enum rptadv_samplerate_quality) == sizeof(int),
-	      "adapter quality enum must use the C int ABI");
-static_assert(RPTADV_SAMPLERATE_ADAPTER_OK == 0,
-	      "adapter result values are part of ABI v1");
-static_assert(RPTADV_SAMPLERATE_ADAPTER_INVALID_ARGUMENT == -1,
-	      "adapter result values are part of ABI v1");
-static_assert(RPTADV_SAMPLERATE_ADAPTER_LIBSAMPLERATE_ERROR == -2,
-	      "adapter result values are part of ABI v1");
-static_assert(RPTADV_SAMPLERATE_ADAPTER_UNSUPPORTED == -3,
-	      "adapter result values are part of ABI v1");
-static_assert(RPTADV_SAMPLERATE_QUALITY_SINC_BEST == 0,
-	      "adapter quality values are part of ABI v1");
-static_assert(RPTADV_SAMPLERATE_QUALITY_SINC_MEDIUM == 1,
-	      "adapter quality values are part of ABI v1");
-static_assert(RPTADV_SAMPLERATE_QUALITY_SINC_FASTEST == 2,
-	      "adapter quality values are part of ABI v1");
+static_assert(sizeof(enum rptadv_samplerate_adapter_result) == sizeof(int), "C-int ABI required");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-_Static_assert(sizeof(enum rptadv_samplerate_adapter_result) == sizeof(int),
-	       "adapter result enum must use the C int ABI");
-_Static_assert(sizeof(enum rptadv_samplerate_quality) == sizeof(int),
-	       "adapter quality enum must use the C int ABI");
-_Static_assert(RPTADV_SAMPLERATE_ADAPTER_OK == 0,
-	       "adapter result values are part of ABI v1");
-_Static_assert(RPTADV_SAMPLERATE_ADAPTER_INVALID_ARGUMENT == -1,
-	       "adapter result values are part of ABI v1");
-_Static_assert(RPTADV_SAMPLERATE_ADAPTER_LIBSAMPLERATE_ERROR == -2,
-	       "adapter result values are part of ABI v1");
-_Static_assert(RPTADV_SAMPLERATE_ADAPTER_UNSUPPORTED == -3,
-	       "adapter result values are part of ABI v1");
-_Static_assert(RPTADV_SAMPLERATE_QUALITY_SINC_BEST == 0,
-	       "adapter quality values are part of ABI v1");
-_Static_assert(RPTADV_SAMPLERATE_QUALITY_SINC_MEDIUM == 1,
-	       "adapter quality values are part of ABI v1");
-_Static_assert(RPTADV_SAMPLERATE_QUALITY_SINC_FASTEST == 2,
-	       "adapter quality values are part of ABI v1");
+_Static_assert(sizeof(enum rptadv_samplerate_adapter_result) == sizeof(int), "C-int ABI required");
 #endif
 
-/**
- * @brief Return the immutable ABI-v1 libsamplerate adapter descriptor.
- *
- * @return A process-lifetime descriptor; it must not be freed or modified.
- *
- * Its capability string equals @ref RPTADV_SAMPLERATE_ADAPTER_CAPABILITY.
- */
-const struct rptadv_samplerate_adapter_descriptor *
-rptadv_samplerate_adapter_descriptor(void);
+/** Return the immutable ABI2 descriptor. */
+const struct rptadv_samplerate_adapter_descriptor *rptadv_samplerate_adapter_descriptor(void);
 
 #ifdef __cplusplus
 }
 #endif
-
 #endif
