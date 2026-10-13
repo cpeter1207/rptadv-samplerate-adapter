@@ -31,6 +31,17 @@ history is zero-extended. Neither query includes PLC. Real-time callers retain
 the filter's intrinsic delay; finite rendering supplies enough trailing input
 to retain its requested duration after trimming the reported prefix.
 
+The optional `converter_input_delay` descriptor tail observes the live distance
+from next output to next input in billionths of a source frame, including FIR
+history and soft-compensation phase. It is rounded to the nearest billionth
+(at most half a billionth of a source frame). Pair the query with the accepted
+source count immediately before a one-output process call to classify that
+output on a quantized source timeline. Zero-output calls do not consume a
+position. Count only actually accepted input, and restart the count after reset.
+This supports ordered missing-source spans without flushing, resetting, or
+adding concealment to the adapter. Existing ABI2 prefixes, SONAME2, and callers
+remain valid; users of the tail check `DESCRIPTOR_INPUT_DELAY_MIN_SIZE` first.
+
 The public descriptor is selected by the stable
 `RPTADV_SAMPLERATE_ADAPTER_CAPABILITY` macro. Consumers verify that name, the
 ABI version, the descriptor's minimum readable prefix, and every required

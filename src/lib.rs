@@ -424,6 +424,23 @@ extern "C" fn converter_output_delay(converter: *mut Converter, output: *mut u32
     OK
 }
 
+/// Live next-input minus next-output position in billionths of a source frame.
+extern "C" fn converter_input_delay(converter: *mut Converter, output: *mut i64) -> c_int {
+    let (Some(converter), Some(output)) = (NonNull::new(converter), NonNull::new(output)) else {
+        return INVALID_ARGUMENT;
+    };
+    let converter = unsafe { converter.as_ref() };
+    // Validated rates fit C int, so this timebase fits i64. Unlike queued(),
+    // retain FIR history and fractional phase, including under compensation.
+    unsafe {
+        *output.as_ptr() = ffi::swr_get_delay(
+            converter.state.as_ptr(),
+            i64::from(converter.input_rate) * 1_000_000_000,
+        );
+    }
+    OK
+}
+
 /// Destroy one stopped converter; a null handle is a no-op.
 extern "C" fn destroy(converter: *mut Converter) {
     if let Some(converter) = NonNull::new(converter) {
@@ -452,6 +469,7 @@ pub struct AdapterDescriptor {
     destroy: extern "C" fn(*mut Converter),
     queued_input: extern "C" fn(*mut Converter, *mut u32) -> c_int,
     converter_output_delay: extern "C" fn(*mut Converter, *mut u32) -> c_int,
+    converter_input_delay: extern "C" fn(*mut Converter, *mut i64) -> c_int,
 }
 
 // SAFETY: descriptor code and its capability string are immutable statics.
@@ -468,6 +486,7 @@ static DESCRIPTOR: AdapterDescriptor = AdapterDescriptor {
     destroy,
     queued_input,
     converter_output_delay,
+    converter_input_delay,
 };
 
 /// Obtain the adapter descriptor before creating any real-time owners.

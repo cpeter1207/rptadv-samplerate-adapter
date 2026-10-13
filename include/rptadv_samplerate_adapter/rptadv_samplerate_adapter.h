@@ -103,12 +103,34 @@ struct rptadv_samplerate_adapter_descriptor {
 	 */
 	enum rptadv_samplerate_adapter_result (*converter_output_delay)(struct rptadv_samplerate_converter *converter,
 		uint32_t *out_frames);
+	/**
+	 * Observe live next-input minus next-output position without allocation.
+	 * @param converter Owned prepared converter.
+	 * @param out_billionths Delay in billionths of one source frame, including
+	 * FIR history and buffered input; rounded to nearest, within half a unit.
+	 * @return An adapter result. This optional ABI2 descriptor tail is neutral
+	 * timeline metadata, not a PCM tag or concealment operation. Before a process
+	 * call limited to one output, subtract this delay from the number of source
+	 * frames accepted since creation/reset to locate that output on the source
+	 * timeline. Count only out_input_used after the call; a zero-output call
+	 * has no output position. The result includes retained fractional phase
+	 * under compensation and can place startup output before source frame zero.
+	 * Flooring the quantized position assigns integer boundaries to the following
+	 * source span; a boundary within half a billionth follows this rounding rule.
+	 */
+	enum rptadv_samplerate_adapter_result (*converter_input_delay)(struct rptadv_samplerate_converter *converter,
+		int64_t *out_billionths);
 };
 
 /** Minimum readable ABI2 descriptor prefix. */
 #define RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_V2_MIN_SIZE \
 	(offsetof(struct rptadv_samplerate_adapter_descriptor, converter_output_delay) + \
 	 sizeof(((struct rptadv_samplerate_adapter_descriptor *)0)->converter_output_delay))
+
+/** Readable prefix required by callers of the optional live-position query. */
+#define RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_INPUT_DELAY_MIN_SIZE \
+	(offsetof(struct rptadv_samplerate_adapter_descriptor, converter_input_delay) + \
+	 sizeof(((struct rptadv_samplerate_adapter_descriptor *)0)->converter_input_delay))
 
 #if defined(__cplusplus)
 static_assert(sizeof(enum rptadv_samplerate_adapter_result) == sizeof(int), "C-int ABI required");

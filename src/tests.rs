@@ -2,6 +2,60 @@
 
 use super::*;
 
+/// Exercise the compatible descriptor tail without requiring the new source name.
+fn input_delay_callback() -> extern "C" fn(*mut Converter, *mut i64) -> c_int {
+    let pointer = rptadv_samplerate_adapter_descriptor();
+    assert!(
+        unsafe { (*pointer).struct_size } >= 72,
+        "input-delay descriptor tail missing"
+    );
+    unsafe {
+        pointer
+            .cast::<u8>()
+            .add(64)
+            .cast::<extern "C" fn(*mut Converter, *mut i64) -> c_int>()
+            .read()
+    }
+}
+
+#[test]
+fn input_delay_tracks_hidden_history_and_live_source_phase() {
+    let delay = input_delay_callback();
+    for (rate, expected_advance) in [(8000, 166_666_667_i64), (48000, 1_000_000_000)] {
+        let mut converter = ptr::null_mut();
+        assert_eq!(create(rate, 48000, 512, 256, &mut converter), OK);
+        let mut before = 0;
+        assert_eq!(delay(converter, &mut before), OK);
+        assert!(before > 0); // Includes FIR history even when queued_input is zero.
+        let mut queued = 1;
+        assert_eq!(queued_input(converter, &mut queued), OK);
+        assert_eq!(queued, 0);
+        let input = [0.25; 160];
+        let mut output = 0.0;
+        let (mut used, mut generated) = (0, 0);
+        assert_eq!(
+            process(
+                converter,
+                input.as_ptr(),
+                160,
+                &mut output,
+                1,
+                48000.0 / f64::from(rate),
+                &mut used,
+                &mut generated
+            ),
+            OK
+        );
+        assert_eq!((used, generated), (160, 1));
+        let mut after = 0;
+        assert_eq!(delay(converter, &mut after), OK);
+        assert!((before + 160_000_000_000 - after - expected_advance).abs() <= 1);
+        assert_eq!(delay(ptr::null_mut(), &mut after), INVALID_ARGUMENT);
+        assert_eq!(delay(converter, ptr::null_mut()), INVALID_ARGUMENT);
+        destroy(converter);
+    }
+}
+
 #[test]
 fn prepared_resampler_uses_16_tap_kaiser_filter_and_full_bandwidth_cutoff() {
     unsafe extern "C" {
@@ -45,6 +99,57 @@ fn prepared_resampler_uses_16_tap_kaiser_filter_and_full_bandwidth_cutoff() {
         0
     );
     assert_eq!(cutoff, 1.0);
+}
+
+#[test]
+fn input_delay_tracks_compensation_changes_and_reset_without_losing_phase() {
+    for rate in [8000, 44100, 48000] {
+        let mut converter = ptr::null_mut();
+        assert_eq!(create(rate, 48000, 512, 256, &mut converter), OK);
+        let input = [0.0; 256];
+        let nominal = 48000.0 / f64::from(rate);
+        let mut accepted = 0_i64;
+        let mut previous = None;
+        for output_index in 0..8192 {
+            let mut before = 0;
+            assert_eq!(converter_input_delay(converter, &mut before), OK);
+            let position = accepted * 1_000_000_000 - before;
+            if let Some(previous) = previous {
+                let advance = (position - previous) as f64 / 1e9;
+                // A one-output step remains correctly located when the next
+                // call changes correction; no nominal-ratio extrapolation.
+                assert!((advance * nominal - 1.0).abs() < 0.002);
+            }
+            let correction = if output_index % 1024 < 512 {
+                1.001
+            } else {
+                0.999
+            };
+            let (mut used, mut generated) = (0, 0);
+            let mut output = 0.0;
+            assert_eq!(
+                process(
+                    converter,
+                    input.as_ptr(),
+                    256,
+                    &mut output,
+                    1,
+                    nominal * correction,
+                    &mut used,
+                    &mut generated
+                ),
+                OK
+            );
+            assert_eq!(generated, 1);
+            accepted += i64::from(used);
+            previous = Some(position);
+        }
+        assert_eq!(reset(converter), OK);
+        let mut delay = 0;
+        assert_eq!(converter_input_delay(converter, &mut delay), OK);
+        assert!(delay > 0 && delay < 100_000_000_000);
+        destroy(converter);
+    }
 }
 
 fn handle() -> *mut Converter {

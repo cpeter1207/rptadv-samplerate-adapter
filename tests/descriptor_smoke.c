@@ -16,6 +16,7 @@ int main(void)
 	float output[1024] = { 0.0F };
 	uint32_t input_used = 0;
 	uint32_t output_generated = 0;
+	int64_t input_delay = 0;
 
 	descriptor = rptadv_samplerate_adapter_descriptor();
 	assert(descriptor != NULL);
@@ -32,6 +33,10 @@ int main(void)
 	assert(descriptor->create(8000, 16000, 512, 1024,
 				  &converter) == RPTADV_SAMPLERATE_ADAPTER_OK);
 	assert(converter != NULL);
+	assert(descriptor->struct_size >= RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_INPUT_DELAY_MIN_SIZE);
+	assert(descriptor->converter_input_delay != NULL);
+	assert(descriptor->converter_input_delay(converter, &input_delay) == RPTADV_SAMPLERATE_ADAPTER_OK);
+	assert(input_delay > 0);
 	assert(descriptor->process(converter, input, 512, output, 1024, 2.0,
 				   &input_used, &output_generated) ==
 	       RPTADV_SAMPLERATE_ADAPTER_OK);
