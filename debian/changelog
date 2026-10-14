@@ -1,3 +1,10 @@
+rptadv-samplerate-adapter (0.2.0~alpha2-1) unstable; urgency=medium
+
+  * Append a compatible live input-delay query for ordered source spans.
+  * Preserve ABI2/SONAME2 and the original descriptor prefix.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Tue, 13 Oct 2026 12:00:00 -0500
+
 rptadv-samplerate-adapter (0.2.0~alpha1-1) unstable; urgency=medium
 
   * Replace the backend with prepared libswresample Kaiser conversion.

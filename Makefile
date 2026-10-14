@@ -14,7 +14,7 @@ PYTHON ?= python3
 
 PACKAGE := rptadv-samplerate-adapter
 CRATE := rptadv_samplerate_adapter
-PACKAGE_VERSION ?= 0.2.0-alpha.1
+PACKAGE_VERSION ?= 0.2.0-alpha.2
 SOVERSION := 2
 PREFIX ?= /usr/local
 DESTDIR ?=
