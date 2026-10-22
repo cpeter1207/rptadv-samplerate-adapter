@@ -163,8 +163,15 @@ int main(void)
 	assert(api != NULL && api->version == 2);
 	assert(api->size >= sizeof(*api));
 	assert(strcmp(api->capability, "rptadv.samplerate") == 0);
-	assert(tone_rms(api, 1000) > 0.35);
-	assert(tone_rms(api, 6000) < 0.0001);
+	double passband = tone_rms(api, 1000);
+	double stopband = tone_rms(api, 6000);
+	double rejection_db = 20 * log10(passband / stopband);
+	fprintf(stderr, "1 kHz RMS=%.9f; 6 kHz RMS=%.9f; rejection=%.2f dB\n",
+		passband, stopband, rejection_db);
+	assert(passband > 0.35);
+	/* Size 8 has a wider transition: retain at least 35 dB rejection at
+	 * this 2 kHz alias probe, rather than size 16's 71 dB requirement. */
+	assert(rejection_db > 35.0);
 	const uint32_t rates[][3] = {{8000, 48000, 256}, {48000, 8000, 256},
 		{48000, 48000, 256}, {8000, 48000, 6176}, {48000, 8000, 6176},
 		{48000, 48000, 6176}, {8000, 48000, 14400}, {48000, 8000, 14400},

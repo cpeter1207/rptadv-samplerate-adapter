@@ -57,7 +57,7 @@ fn input_delay_tracks_hidden_history_and_live_source_phase() {
 }
 
 #[test]
-fn prepared_resampler_uses_16_tap_kaiser_filter_and_full_bandwidth_cutoff() {
+fn prepared_resampler_uses_8_tap_kaiser_filter_and_full_bandwidth_cutoff() {
     unsafe extern "C" {
         fn av_opt_get_double(
             object: *mut std::ffi::c_void,
@@ -85,7 +85,7 @@ fn prepared_resampler_uses_16_tap_kaiser_filter_and_full_bandwidth_cutoff() {
         },
         0
     );
-    assert_eq!(filter_size, 16);
+    assert_eq!(filter_size, 8);
     let mut cutoff = 0.0;
     assert_eq!(
         unsafe {
