@@ -47,7 +47,8 @@ struct rptadv_samplerate_adapter_descriptor {
 	 * @return An adapter result. Nominal ratios range from 1/256 through 256.
 	 * Frame bounds must be positive and representable by the backend. Setup
 	 * allocates storage and warms the selected SWR Kaiser filter: size 16,
-	 * cutoff 1.0. There is no variable quality or multichannel selector.
+	 * cutoff 1.0 (the 6 dB point at the lower nominal Nyquist frequency).
+	 * There is no variable quality or multichannel selector.
 	 */
 	enum rptadv_samplerate_adapter_result (*create)(uint32_t input_rate_hz,
 		uint32_t output_rate_hz, uint32_t maximum_input_frames,
