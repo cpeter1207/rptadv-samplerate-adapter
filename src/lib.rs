@@ -26,8 +26,8 @@ const BACKEND_ERROR: c_int = -2;
 const UNSUPPORTED: c_int = -3;
 /// Compensation duration in output frames; one unit resolves one ppm.
 const COMPENSATION_DISTANCE: c_int = 1_000_000;
-/// Eight-tap SWR Kaiser filter size used by each prepared converter.
-const FILTER_SIZE: usize = 8;
+/// SWR Kaiser filter size; the backend expands its length for downsampling.
+const FILTER_SIZE: usize = 16;
 
 #[cfg(test)]
 /// Backend failure points used only by deterministic unit tests.
