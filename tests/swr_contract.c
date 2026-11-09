@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -20,6 +21,9 @@ struct adapter {
 	void (*destroy)(void *);
 	int (*queued_input)(void *, uint32_t *);
 	int (*converter_output_delay)(void *, uint32_t *);
+	int (*converter_input_delay)(void *, int64_t *);
+	int (*create_pacing)(uint32_t, uint32_t, uint32_t, uint32_t,
+			     double, double, void **);
 };
 extern const void *rptadv_samplerate_adapter_descriptor(void);
 extern void swr_test_realtime_begin(void) __attribute__((weak));
@@ -157,12 +161,97 @@ static uint64_t run(const struct adapter *api, void *handle, double ratio,
 	return generated;
 }
 
+/** Exercise the full prepared envelope under the real SWR allocation guard. */
+static void pacing_contract(const struct adapter *api)
+{
+	const uint32_t rates[][3] = {{48000, 48000, 256}, {8000, 48000, 6176},
+		{48000, 8000, 14400}, {256, 1, 256}, {1, 256, 256}};
+	for (unsigned rate = 0; rate < sizeof(rates) / sizeof(rates[0]); ++rate) {
+		void *handle = NULL;
+		double nominal = (double)rates[rate][1] / rates[rate][0];
+		double minimum = nominal * 0.95, maximum = nominal * 1.05;
+		assert(api->create_pacing(rates[rate][0], rates[rate][1], rates[rate][2],
+					 256, minimum, maximum, &handle) == 0);
+		if (swr_test_realtime_begin)
+			swr_test_realtime_begin();
+		float input[256], output[256];
+		for (unsigned i = 0; i < 256; ++i)
+			input[i] = 0.25f;
+		for (unsigned change = 0; change < 512; ++change) {
+			double ratio = minimum + (maximum - minimum) * (change % 17) / 16;
+			uint32_t used = 0, generated = 0;
+			assert(api->process(handle, input, 256, output, 256, ratio,
+					    &used, &generated) == 0);
+			assert(used <= 256 && generated <= 256 && (used || generated));
+			checkpoint("live pacing changes without reset");
+		}
+		assert(api->reset(handle) == 0);
+		for (unsigned change = 0; change < 64; ++change) {
+			double ratio = change % 2 ? minimum : maximum;
+			(void)maximum_request(api, handle, rates[rate][2], ratio);
+			checkpoint("pacing maximum request and reset");
+			uint64_t generated = run(api, handle, ratio, 40, 0.0f);
+			double expected = 10240 * ratio;
+			assert(fabs((double)generated - expected) < 3 + expected * 0.000001);
+			checkpoint("pacing silent stream after reset");
+			int64_t position = 0;
+			assert(api->converter_input_delay(handle, &position) == 0);
+			assert(position > 0);
+			assert(api->reset(handle) == 0);
+			checkpoint("pacing endpoint changes and position");
+		}
+		if (swr_test_realtime_end)
+			swr_test_realtime_end();
+		api->destroy(handle);
+	}
+}
+
+/** A large legal call retains its ratio and prepared storage past one million outputs. */
+static void large_call_contract(const struct adapter *api)
+{
+	float *input = malloc(2000000 * sizeof(*input));
+	float *output = malloc(2100000 * sizeof(*output));
+	assert(input != NULL && output != NULL);
+	for (unsigned paced = 0; paced < 2; ++paced) {
+		void *handle = NULL;
+		double ratio = paced ? 0.95 : 0.999;
+		assert((paced ? api->create_pacing(48000, 48000, 2000000, 2100000,
+						 0.95, 1.05, &handle) :
+				api->create(48000, 48000, 2000000, 2100000, &handle)) == 0);
+		for (unsigned i = 0; i < 2000000; ++i)
+			input[i] = 0.25f;
+		if (swr_test_realtime_begin)
+			swr_test_realtime_begin();
+		for (unsigned burst = 0; burst < 2; ++burst) {
+			uint32_t used = 0, generated = 0;
+			assert(api->process(handle, input, 2000000, output, 2100000, ratio,
+					    &used, &generated) == 0);
+			assert(used == 2000000);
+			assert(fabs((double)generated - 2000000 * ratio) < 3);
+			for (uint32_t i = 0; i < generated; ++i) {
+				assert(isfinite(output[i]));
+				assert(burst == 0 || output[i] == 0.0f);
+			}
+			assert(api->reset(handle) == 0);
+			checkpoint("large-call conversion and history reset");
+			memset(input, 0, 2000000 * sizeof(*input));
+		}
+		if (swr_test_realtime_end)
+			swr_test_realtime_end();
+		api->destroy(handle);
+	}
+	free(output);
+	free(input);
+}
+
 int main(void)
 {
 	const struct adapter *api = rptadv_samplerate_adapter_descriptor();
 	assert(api != NULL && api->version == 2);
 	assert(api->size >= sizeof(*api));
 	assert(strcmp(api->capability, "rptadv.samplerate") == 0);
+	pacing_contract(api);
+	large_call_contract(api);
 	double passband = tone_rms(api, 1000);
 	double stopband = tone_rms(api, 6000);
 	double rejection_db = 20 * log10(passband / stopband);

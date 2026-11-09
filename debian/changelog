@@ -1,3 +1,11 @@
+rptadv-samplerate-adapter (0.2.0~alpha3-1) unstable; urgency=medium
+
+  * Add explicit prepared manual pacing through an optional ABI2 descriptor tail.
+  * Preserve ordinary clock correction and source-position/reset contracts.
+  * Retain requested compensation across every legal large conversion call.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Mon, 09 Nov 2026 12:00:00 -0600
+
 rptadv-samplerate-adapter (0.2.0~alpha2-1) unstable; urgency=medium
 
   * Append a compatible live input-delay query for ordered source spans.

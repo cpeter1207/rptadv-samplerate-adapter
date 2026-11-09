@@ -9,7 +9,7 @@ The adapter prepares persistent mono libswresample converters and exchanges
 normalized F32 PCM (`-1.0` through `+1.0`). Conversion uses the SWR engine,
 filter size 16, cutoff 1.0, and a Kaiser window. Forced resampling supports
 soft clock compensation even when nominal input/output rates match. Each
-process ratio stays within 1000 ppm of the fixed nominal ratio.
+ordinary process ratio stays within 1000 ppm of the fixed nominal ratio.
 
 ABI2/SONAME2 replaces ABI1: callers supply nominal rates and maximum input/output
 frame counts when creating the converter; the obsolete quality selectors are
@@ -41,6 +41,23 @@ position. Count only actually accepted input, and restart the count after reset.
 This supports ordered missing-source spans without flushing, resetting, or
 adding concealment to the adapter. Existing ABI2 prefixes, SONAME2, and callers
 remain valid; users of the tail check `DESCRIPTOR_INPUT_DELAY_MIN_SIZE` first.
+
+The optional `create_pacing` descriptor tail prepares caller-controlled manual
+playout pacing, using the same conversion, reset and position operations. Check
+`RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_PACING_MIN_SIZE` and the constructor pointer
+before using it. Absolute minimum/maximum output/input ratios must be finite,
+include nominal, and fit nominal times `[0.95, 1.05]`. Setup reserves storage for
+the entire selected range and keeps compensation active for the maximum
+declared output call, including calls beyond one million frames; it adds no
+clock estimator. This envelope is a
+prepared builder limit, not a recommended playout policy. At equal rates, an
+RF presentation speed from 1.00 through 1.02 uses ratios `1/1.02` through `1.0`.
+The caller retains unaccepted input, counts actual generated output, and uses
+the live source-position query to account retained filter history. Ordinary
+`create` handles keep their existing 1000 ppm limits. The ABI2 prefix, SONAME2,
+and runtime package name remain unchanged; consumers using the new tail must
+require a provider release that includes it rather than assume every ABI2
+provider supports pacing.
 
 The public descriptor is selected by the stable
 `RPTADV_SAMPLERATE_ADAPTER_CAPABILITY` macro. Consumers verify that name, the

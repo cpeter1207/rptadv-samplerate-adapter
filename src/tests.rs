@@ -2,6 +2,235 @@
 
 use super::*;
 
+type CreatePacing = extern "C" fn(u32, u32, u32, u32, f64, f64, *mut *mut Converter) -> c_int;
+
+/// Read the appended capability only after checking its independently known prefix.
+fn pacing_callback() -> CreatePacing {
+    let offset = std::mem::offset_of!(AdapterDescriptor, converter_input_delay)
+        + size_of::<extern "C" fn(*mut Converter, *mut i64) -> c_int>();
+    let pointer = rptadv_samplerate_adapter_descriptor();
+    assert!(
+        unsafe { (*pointer).struct_size as usize } >= offset + size_of::<CreatePacing>(),
+        "manual-pacing descriptor tail missing"
+    );
+    unsafe {
+        pointer
+            .cast::<u8>()
+            .add(offset)
+            .cast::<CreatePacing>()
+            .read()
+    }
+}
+
+#[test]
+fn pacing_is_explicit_and_ordinary_handles_retain_clock_correction_limits() {
+    let create_pacing = pacing_callback();
+    let input = [0.25; 256];
+    let mut output = [0.0; 256];
+    for paced in [false, true] {
+        let mut converter = ptr::null_mut();
+        assert_eq!(
+            if paced {
+                create_pacing(48000, 48000, 256, 256, 1.0 / 1.02, 1.0, &mut converter)
+            } else {
+                create(48000, 48000, 256, 256, &mut converter)
+            },
+            OK
+        );
+        let (mut used, mut generated) = (42, 42);
+        assert_eq!(
+            process(
+                converter,
+                input.as_ptr(),
+                256,
+                output.as_mut_ptr(),
+                256,
+                1.0 / 1.02,
+                &mut used,
+                &mut generated,
+            ),
+            if paced { OK } else { INVALID_ARGUMENT }
+        );
+        if paced {
+            assert_eq!(used, 256);
+            assert!((249..=252).contains(&generated));
+        } else {
+            assert_eq!((used, generated), (0, 0));
+        }
+        destroy(converter);
+    }
+}
+
+#[test]
+fn pacing_constructor_validates_prepared_bounds_and_clears_failed_handles() {
+    let create_pacing = pacing_callback();
+    assert_eq!(
+        create_pacing(48000, 48000, 256, 256, 0.95, 1.05, ptr::null_mut()),
+        INVALID_ARGUMENT
+    );
+    for (minimum, maximum) in [
+        (f64::NAN, 1.0),
+        (1.0, f64::NAN),
+        (f64::NEG_INFINITY, 1.0),
+        (1.0, f64::INFINITY),
+        (1.0, 0.99),
+        (0.95, 0.99),
+        (1.01, 1.05),
+        (0.949999, 1.0),
+        (1.0, 1.050001),
+    ] {
+        let mut converter = ptr::dangling_mut();
+        assert_eq!(
+            create_pacing(48000, 48000, 256, 256, minimum, maximum, &mut converter),
+            INVALID_ARGUMENT
+        );
+        assert!(converter.is_null());
+    }
+    let mut converter = ptr::dangling_mut();
+    TEST_FAILURE.with(|pending| pending.set(Some(TestFailure::Allocate)));
+    assert_eq!(
+        create_pacing(48000, 48000, 256, 256, 0.95, 1.05, &mut converter),
+        BACKEND_ERROR
+    );
+    assert!(converter.is_null());
+    assert_eq!(
+        create_pacing(8000, 48000, 256, 256, 6.0, 6.0, &mut converter),
+        OK
+    );
+    destroy(converter);
+    assert_eq!(
+        create_pacing(48000, 48000, 256, 256, 1.0, 1.05, &mut converter),
+        OK
+    );
+    destroy(converter);
+}
+
+#[test]
+fn pacing_warmup_backend_failures_clear_the_output_handle() {
+    for (failure, skip) in [(TestFailure::Compensation, 3), (TestFailure::Convert, 6)] {
+        TEST_FAILURE_SKIP.with(|remaining| remaining.set(skip));
+        TEST_FAILURE.with(|pending| pending.set(Some(failure)));
+        let mut converter = ptr::dangling_mut();
+        assert_eq!(
+            pacing_callback()(48000, 48000, 1, 4096, 0.95, 1.05, &mut converter),
+            BACKEND_ERROR
+        );
+        assert!(converter.is_null());
+        assert!(TEST_FAILURE.with(Cell::get).is_none());
+    }
+}
+
+#[test]
+fn pacing_process_rejects_unprepared_ratios_and_invalid_counts_without_writes() {
+    let mut converter = ptr::null_mut();
+    assert_eq!(
+        pacing_callback()(48000, 48000, 256, 256, 1.0 / 1.02, 1.0, &mut converter),
+        OK
+    );
+    let input = [0.25; 257];
+    let mut output = [42.0; 257];
+    for (count, capacity, ratio) in [
+        (256, 256, 0.97),
+        (256, 256, 1.001),
+        (256, 256, f64::NAN),
+        (257, 256, 1.0),
+        (256, 257, 1.0),
+    ] {
+        let (mut used, mut generated) = (42, 42);
+        assert_eq!(
+            process(
+                converter,
+                input.as_ptr(),
+                count,
+                output.as_mut_ptr(),
+                capacity,
+                ratio,
+                &mut used,
+                &mut generated,
+            ),
+            INVALID_ARGUMENT
+        );
+        assert_eq!((used, generated), (0, 0));
+        assert_eq!(output, [42.0; 257]);
+    }
+    destroy(converter);
+}
+
+#[test]
+fn pacing_position_tracks_actual_phase_through_rapid_changes_and_reset() {
+    let mut converter = ptr::null_mut();
+    assert_eq!(
+        pacing_callback()(48000, 48000, 512, 256, 0.95, 1.05, &mut converter),
+        OK
+    );
+    let input = [0.25; 512];
+    let mut accepted = 0_i64;
+    let mut previous = None;
+    for index in 0..8192 {
+        let mut before = 0;
+        assert_eq!(converter_input_delay(converter, &mut before), OK);
+        let position = accepted * 1_000_000_000 - before;
+        if let Some(previous) = previous {
+            let advance = (position - previous) as f64 / 1e9;
+            let expected = if index % 2 == 1 {
+                1.0 / 0.95
+            } else {
+                1.0 / 1.05
+            };
+            assert!((advance - expected).abs() < 0.000001);
+        }
+        let (mut used, mut generated) = (0, 0);
+        let mut output = 0.0;
+        assert_eq!(
+            process(
+                converter,
+                input.as_ptr(),
+                512,
+                &mut output,
+                1,
+                if index % 2 == 0 { 0.95 } else { 1.05 },
+                &mut used,
+                &mut generated,
+            ),
+            OK
+        );
+        assert_eq!(generated, 1);
+        let mut queued = 0;
+        assert_eq!(queued_input(converter, &mut queued), OK);
+        assert!(queued <= 512);
+        accepted += i64::from(used);
+        previous = Some(position);
+    }
+    assert_eq!(reset(converter), OK);
+    let mut queued = 42;
+    assert_eq!(queued_input(converter, &mut queued), OK);
+    assert_eq!(queued, 0);
+    for ratio in [0.95, 1.05, 1.0 / 1.02, 1.0] {
+        let zeros = [0.0; 512];
+        let mut output = [42.0; 256];
+        let (mut used, mut generated) = (0, 0);
+        assert_eq!(
+            process(
+                converter,
+                zeros.as_ptr(),
+                512,
+                output.as_mut_ptr(),
+                256,
+                ratio,
+                &mut used,
+                &mut generated,
+            ),
+            OK
+        );
+        assert!(
+            output[..generated as usize]
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
+    }
+    destroy(converter);
+}
+
 /// Exercise the compatible descriptor tail without requiring the new source name.
 fn input_delay_callback() -> extern "C" fn(*mut Converter, *mut i64) -> c_int {
     let pointer = rptadv_samplerate_adapter_descriptor();
@@ -72,7 +301,7 @@ fn prepared_resampler_uses_size_16_kaiser_filter_and_nyquist_cutoff() {
             value: *mut i64,
         ) -> c_int;
     }
-    let converter = prepare(48000, 8000, 256, 256).unwrap();
+    let converter = prepare(48000, 8000, 256, 256, 0.999 / 6.0, 1.001 / 6.0).unwrap();
     let mut filter_size = 0;
     assert_eq!(
         unsafe {
@@ -185,7 +414,7 @@ fn preparation_reports_each_backend_failure() {
     ] {
         TEST_FAILURE.with(|pending| pending.set(Some(failure)));
         assert_eq!(
-            prepare(48000, 8000, 256, 256).map(|_| ()),
+            prepare(48000, 8000, 256, 256, 0.999 / 6.0, 1.001 / 6.0).map(|_| ()),
             Err(BACKEND_ERROR)
         );
     }
@@ -478,10 +707,17 @@ fn zero_output_does_not_accept_input_and_queue_remains_bounded() {
     destroy(value);
 }
 
-fn render_partition(input: &[f32], block: usize, capacity: usize) -> Vec<f32> {
-    let value = handle();
+fn render_partition(
+    input: &[f32],
+    block: usize,
+    capacity: usize,
+    value: *mut Converter,
+    ratio: f64,
+) -> (Vec<f32>, i64) {
+    let mut initial_delay = 0;
+    assert_eq!(converter_input_delay(value, &mut initial_delay), OK);
     let mut result = Vec::new();
-    let mut output = [0.0; 256];
+    let mut output = vec![0.0; capacity];
     for chunk in input.chunks(block) {
         let mut offset = 0;
         while offset < chunk.len() {
@@ -493,7 +729,7 @@ fn render_partition(input: &[f32], block: usize, capacity: usize) -> Vec<f32> {
                     (chunk.len() - offset) as u32,
                     output.as_mut_ptr(),
                     capacity as u32,
-                    1.0 / 6.0,
+                    ratio,
                     &mut used,
                     &mut generated
                 ),
@@ -513,7 +749,7 @@ fn render_partition(input: &[f32], block: usize, capacity: usize) -> Vec<f32> {
                 0,
                 output.as_mut_ptr(),
                 capacity as u32,
-                1.0 / 6.0,
+                ratio,
                 &mut used,
                 &mut generated
             ),
@@ -525,8 +761,11 @@ fn render_partition(input: &[f32], block: usize, capacity: usize) -> Vec<f32> {
             break;
         }
     }
+    let mut final_delay = 0;
+    assert_eq!(converter_input_delay(value, &mut final_delay), OK);
+    let advance = input.len() as i64 * 1_000_000_000 + initial_delay - final_delay;
     destroy(value);
-    result
+    (result, advance)
 }
 
 #[test]
@@ -534,9 +773,88 @@ fn asymmetric_partitions_produce_identical_pcm_and_counts() {
     let input: Vec<_> = (0..12000)
         .map(|index| (index as f32 * 0.09).sin() * 0.5)
         .collect();
-    let expected = render_partition(&input, 256, 256);
-    assert_eq!(expected.len(), 2000);
+    let expected = render_partition(&input, 256, 256, handle(), 1.0 / 6.0);
+    assert_eq!(expected.0.len(), 2000);
     for (block, output) in [(1, 1), (7, 17), (256, 1), (17, 256)] {
-        assert_eq!(render_partition(&input, block, output), expected);
+        assert_eq!(
+            render_partition(&input, block, output, handle(), 1.0 / 6.0),
+            expected
+        );
     }
+}
+
+#[test]
+fn pacing_counts_and_pcm_are_independent_of_input_and_output_partitions() {
+    let input: Vec<_> = (0..12000)
+        .map(|index| (index as f32 * 0.09).sin() * 0.5)
+        .collect();
+    for (ratio, count) in [
+        (0.95, 11400),
+        (1.0 / 1.02, 11765),
+        (1.0, 12000),
+        (1.05, 12600),
+    ] {
+        let render = |block, output| {
+            let mut converter = ptr::null_mut();
+            assert_eq!(
+                pacing_callback()(48000, 48000, 256, 256, 0.95, 1.05, &mut converter),
+                OK
+            );
+            render_partition(&input, block, output, converter, ratio)
+        };
+        let expected = render(256, 256);
+        assert!(expected.0.len().abs_diff(count) <= 1);
+        for (block, output) in [(1, 1), (7, 17), (256, 1), (17, 256)] {
+            assert_eq!(render(block, output), expected);
+        }
+    }
+}
+
+/// Legal calls beyond one million outputs must retain correction for the whole call.
+fn check_large_call_partitioning(paced: bool) {
+    let input: Vec<_> = (0..2_000_000)
+        .map(|index| (index as f32 * 0.09).sin() * 0.5)
+        .collect();
+    let ratio = if paced { 0.95 } else { 0.999 };
+    let render = |block, capacity| {
+        let mut converter = ptr::null_mut();
+        assert_eq!(
+            if paced {
+                pacing_callback()(
+                    48000,
+                    48000,
+                    2_000_000,
+                    2_100_000,
+                    0.95,
+                    1.05,
+                    &mut converter,
+                )
+            } else {
+                create(48000, 48000, 2_000_000, 2_100_000, &mut converter)
+            },
+            OK
+        );
+        render_partition(&input, block, capacity, converter, ratio)
+    };
+    let expected = render(256, 256);
+    let actual = render(2_000_000, 2_100_000);
+    assert_eq!(
+        actual.0.len(),
+        expected.0.len(),
+        "large call changed output count"
+    );
+    assert_eq!(actual.1, expected.1, "large call changed source advance");
+    assert!(actual.0 == expected.0, "large call changed PCM");
+    let expected_advance = actual.0.len() as f64 / ratio;
+    assert!((actual.1 as f64 / 1e9 - expected_advance).abs() < 2.0);
+}
+
+#[test]
+fn pacing_large_calls_match_partitioned_counts_pcm_and_source_positions() {
+    check_large_call_partitioning(true);
+}
+
+#[test]
+fn ordinary_large_calls_match_partitioned_counts_pcm_and_source_positions() {
+    check_large_call_partitioning(false);
 }

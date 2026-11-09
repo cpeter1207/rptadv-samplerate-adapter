@@ -24,8 +24,8 @@ const INVALID_ARGUMENT: c_int = -1;
 const BACKEND_ERROR: c_int = -2;
 /// Rates or frame counts exceed the backend integer representation.
 const UNSUPPORTED: c_int = -3;
-/// Compensation duration in output frames; one unit resolves one ppm.
-const COMPENSATION_DISTANCE: c_int = 1_000_000;
+/// Minimum compensation duration in output frames; at least one-ppm resolution.
+const MINIMUM_COMPENSATION_DISTANCE: c_int = 1_000_000;
 /// SWR Kaiser filter size; the backend expands its length for downsampling.
 const FILTER_SIZE: usize = 16;
 
@@ -47,6 +47,8 @@ enum TestFailure {
 thread_local! {
     /// Per-test backend failure injection, isolated across concurrent tests.
     static TEST_FAILURE: Cell<Option<TestFailure>> = const { Cell::new(None) };
+    /// Matching calls to allow before the one-shot failure, for late setup paths.
+    static TEST_FAILURE_SKIP: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -54,6 +56,11 @@ thread_local! {
 fn take_test_failure(failure: TestFailure) -> bool {
     TEST_FAILURE.with(|pending| {
         if pending.get() == Some(failure) {
+            let remaining = TEST_FAILURE_SKIP.with(Cell::get);
+            if remaining != 0 {
+                TEST_FAILURE_SKIP.with(|skip| skip.set(remaining - 1));
+                return false;
+            }
             pending.set(None);
             true
         } else {
@@ -136,8 +143,11 @@ pub struct Converter {
     state: NonNull<ffi::SwrContext>,
     input_rate: u32,
     nominal_ratio: f64,
+    minimum_ratio: f64,
+    maximum_ratio: f64,
     maximum_input: u32,
     maximum_output: u32,
+    compensation_distance: c_int,
     zeros: Vec<f32>,
     discard: Vec<f32>,
     baseline_delay: i64,
@@ -153,6 +163,15 @@ impl Drop for Converter {
 }
 
 impl Converter {
+    /// Apply caller-selected pacing or clock correction without estimating either.
+    fn set_ratio(&mut self, ratio: f64) -> c_int {
+        // The prepared envelope bounds |delta| by distance/19 + 0.5;
+        // distance <= INT_MAX keeps the rounded correction representable.
+        let delta = (f64::from(self.compensation_distance) * (1.0 - self.nominal_ratio / ratio))
+            .round() as c_int;
+        swr_set_compensation(self.state.as_ptr(), delta, self.compensation_distance)
+    }
+
     /// Convert into prepared discard storage without flushing the stream.
     fn discard_conversion(&mut self, input_frames: usize) -> Result<c_int, c_int> {
         let input = self.zeros.as_ptr().cast::<u8>();
@@ -234,6 +253,8 @@ fn prepare(
     output_rate: u32,
     maximum_input: u32,
     maximum_output: u32,
+    minimum_ratio: f64,
+    maximum_ratio: f64,
 ) -> Result<Converter, c_int> {
     if [input_rate, output_rate, maximum_input, maximum_output].contains(&0) {
         return Err(INVALID_ARGUMENT);
@@ -248,9 +269,20 @@ fn prepare(
     if !(1.0 / 256.0..=256.0).contains(&nominal_ratio) {
         return Err(UNSUPPORTED);
     }
+    if !minimum_ratio.is_finite()
+        || !maximum_ratio.is_finite()
+        || minimum_ratio < nominal_ratio * 0.95
+        || minimum_ratio > nominal_ratio
+        || maximum_ratio < nominal_ratio
+        || maximum_ratio > nominal_ratio * 1.05
+    {
+        return Err(INVALID_ARGUMENT);
+    }
     // FFmpeg expands a downsampling FIR by its inverse cutoff. This
     // conservative bound covers its even-length rounding and initial mirror.
-    let history = (FILTER_SIZE as f64 / (nominal_ratio * 0.985).min(1.0)).ceil() as usize + 4;
+    let history = (FILTER_SIZE as f64 / minimum_ratio.min(nominal_ratio * 0.985).min(1.0)).ceil()
+        as usize
+        + 4;
     let warm_length = history
         .checked_mul(4)
         .and_then(|length| length.checked_add(maximum_input as usize * 2))
@@ -263,8 +295,13 @@ fn prepare(
         state,
         input_rate,
         nominal_ratio,
+        minimum_ratio,
+        maximum_ratio,
         maximum_input,
         maximum_output,
+        // SWR restores nominal after this many generated samples. Cover the
+        // entire largest legal call, including ordinary clock correction.
+        compensation_distance: MINIMUM_COMPENSATION_DISTANCE.max(maximum_output as c_int),
         zeros,
         discard,
         baseline_delay: 0,
@@ -294,13 +331,25 @@ fn prepare(
         return Err(BACKEND_ERROR);
     }
     if swr_init(state.as_ptr()) < 0
-        || swr_set_compensation(state.as_ptr(), 1, COMPENSATION_DISTANCE) < 0
+        || swr_set_compensation(state.as_ptr(), 1, converter.compensation_distance) < 0
     {
         return Err(BACKEND_ERROR);
     }
     // The first warmup can use SWR's initial direct-input path. Repeat with
     // established history to reserve the buffered path used by burst reset.
     for _ in 0..2 {
+        converter.clear_history()?;
+    }
+    if minimum_ratio < nominal_ratio * 0.999 || maximum_ratio > nominal_ratio * 1.001 {
+        // Reserve both extremes before returning a wider-range handle. SWR
+        // retains these buffers; reset must scrub their complete extent too.
+        for ratio in [minimum_ratio, maximum_ratio] {
+            if converter.set_ratio(ratio) < 0 {
+                return Err(BACKEND_ERROR);
+            }
+            converter.discard_conversion(converter.zeros.len())?;
+            converter.drain_discard()?;
+        }
         converter.clear_history()?;
     }
     converter.output_delay =
@@ -316,11 +365,40 @@ extern "C" fn create(
     maximum_output: u32,
     output: *mut *mut Converter,
 ) -> c_int {
+    let nominal = f64::from(output_rate) / f64::from(input_rate);
+    create_pacing(
+        input_rate,
+        output_rate,
+        maximum_input,
+        maximum_output,
+        nominal * 0.999,
+        nominal * 1.001,
+        output,
+    )
+}
+
+/// Prepare explicit caller-controlled ratio bounds; no clock estimator is added.
+extern "C" fn create_pacing(
+    input_rate: u32,
+    output_rate: u32,
+    maximum_input: u32,
+    maximum_output: u32,
+    minimum_ratio: f64,
+    maximum_ratio: f64,
+    output: *mut *mut Converter,
+) -> c_int {
     let Some(output) = NonNull::new(output) else {
         return INVALID_ARGUMENT;
     };
     unsafe { *output.as_ptr() = ptr::null_mut() };
-    match prepare(input_rate, output_rate, maximum_input, maximum_output) {
+    match prepare(
+        input_rate,
+        output_rate,
+        maximum_input,
+        maximum_output,
+        minimum_ratio,
+        maximum_ratio,
+    ) {
         Ok(converter) => {
             unsafe { *output.as_ptr() = Box::into_raw(Box::new(converter)) };
             OK
@@ -339,7 +417,7 @@ extern "C" fn reset(converter: *mut Converter) -> c_int {
         .map_or_else(|error| error, |()| OK)
 }
 
-/// Convert bounded PCM with at most 1000 ppm correction about nominal rates.
+/// Convert bounded PCM within this handle's immutable prepared ratio bounds.
 extern "C" fn process(
     converter: *mut Converter,
     input: *const f32,
@@ -363,8 +441,8 @@ extern "C" fn process(
     }
     let converter = unsafe { converter.as_mut() };
     if !ratio.is_finite()
-        || ratio < converter.nominal_ratio * 0.999
-        || ratio > converter.nominal_ratio * 1.001
+        || ratio < converter.minimum_ratio
+        || ratio > converter.maximum_ratio
         || input_frames > converter.maximum_input
         || output_capacity > converter.maximum_output
         || (input_frames != 0 && input.is_null())
@@ -376,9 +454,7 @@ extern "C" fn process(
         return OK;
     }
     let accepted = input_frames.min(converter.maximum_input.saturating_sub(converter.queued()));
-    let delta = (f64::from(COMPENSATION_DISTANCE) * (1.0 - converter.nominal_ratio / ratio)).round()
-        as c_int;
-    if swr_set_compensation(converter.state.as_ptr(), delta, COMPENSATION_DISTANCE) < 0 {
+    if converter.set_ratio(ratio) < 0 {
         return BACKEND_ERROR;
     }
     // Nonnull planes with zero count drain ready PCM without an EOF flush.
@@ -470,6 +546,7 @@ pub struct AdapterDescriptor {
     queued_input: extern "C" fn(*mut Converter, *mut u32) -> c_int,
     converter_output_delay: extern "C" fn(*mut Converter, *mut u32) -> c_int,
     converter_input_delay: extern "C" fn(*mut Converter, *mut i64) -> c_int,
+    create_pacing: extern "C" fn(u32, u32, u32, u32, f64, f64, *mut *mut Converter) -> c_int,
 }
 
 // SAFETY: descriptor code and its capability string are immutable statics.
@@ -487,6 +564,7 @@ static DESCRIPTOR: AdapterDescriptor = AdapterDescriptor {
     queued_input,
     converter_output_delay,
     converter_input_delay,
+    create_pacing,
 };
 
 /// Obtain the adapter descriptor before creating any real-time owners.
