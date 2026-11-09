@@ -69,7 +69,7 @@ struct rptadv_samplerate_adapter_descriptor {
 	 * @param input_frames Available input, within the configured maximum.
 	 * @param output Disjoint output; may be null only for zero capacity.
 	 * @param output_capacity Output capacity, within the configured maximum.
-	 * @param ratio Output/input ratio within nominal * [0.999, 1.001].
+	 * @param ratio Output/input ratio within this handle's prepared bounds.
 	 * @param out_input_used Accepted input prefix, including internally queued PCM.
 	 * @param out_output_generated Actual samples written, without final-tail padding.
 	 * @return An adapter result.
@@ -78,6 +78,8 @@ struct rptadv_samplerate_adapter_descriptor {
 	 * Startup/reset history is zero-extended; intrinsic FIR latency remains.
 	 * Validation failures leave the two output counts zero when their pointers
 	 * and converter are valid. A backend failure requires a successful reset.
+	 * Ordinary create handles retain nominal * [0.999, 1.001]. Explicit
+	 * create_pacing handles use their immutable minimum/maximum instead.
 	 */
 	enum rptadv_samplerate_adapter_result (*process)(struct rptadv_samplerate_converter *converter,
 		const float *input, uint32_t input_frames, float *output,
@@ -121,6 +123,30 @@ struct rptadv_samplerate_adapter_descriptor {
 	 */
 	enum rptadv_samplerate_adapter_result (*converter_input_delay)(struct rptadv_samplerate_converter *converter,
 		int64_t *out_billionths);
+	/**
+	 * Prepare explicit manual pacing without adding a clock estimator.
+	 * @param input_rate_hz Nominal source rate, as for create.
+	 * @param output_rate_hz Nominal destination rate, as for create.
+	 * @param maximum_input_frames Maximum input count per process call.
+	 * @param maximum_output_frames Maximum output capacity per process call.
+	 * @param minimum_ratio Absolute minimum output/input ratio, inclusive.
+	 * @param maximum_ratio Absolute maximum output/input ratio, inclusive.
+	 * @param out_converter Owned handle on success; null on failure.
+	 * @return An adapter result. Both bounds must be finite, contain the
+	 * nominal ratio, and lie within nominal * [0.95, 1.05]. Equal bounds are
+	 * permitted only at nominal. This is a prepared builder safety envelope,
+	 * not an ordinary clock-correction policy or recommended playout speed.
+	 * Setup reserves storage across the bounds. The same process, reset and
+	 * position queries serve the handle without allocation. The caller alone
+	 * selects ratios and accounts actual accepted/generated samples.
+	 * At equal rates, a 1.02-times presentation speed uses 1/1.02 through 1.0;
+	 * smaller output/input ratios consume more source per output sample.
+	 * This optional ABI2 tail leaves ordinary create behavior unchanged.
+	 */
+	enum rptadv_samplerate_adapter_result (*create_pacing)(uint32_t input_rate_hz,
+		uint32_t output_rate_hz, uint32_t maximum_input_frames,
+		uint32_t maximum_output_frames, double minimum_ratio,
+		double maximum_ratio, struct rptadv_samplerate_converter **out_converter);
 };
 
 /** Minimum readable ABI2 descriptor prefix. */
@@ -132,6 +158,11 @@ struct rptadv_samplerate_adapter_descriptor {
 #define RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_INPUT_DELAY_MIN_SIZE \
 	(offsetof(struct rptadv_samplerate_adapter_descriptor, converter_input_delay) + \
 	 sizeof(((struct rptadv_samplerate_adapter_descriptor *)0)->converter_input_delay))
+
+/** Readable prefix required before using explicit prepared manual pacing. */
+#define RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_PACING_MIN_SIZE \
+	(offsetof(struct rptadv_samplerate_adapter_descriptor, create_pacing) + \
+	 sizeof(((struct rptadv_samplerate_adapter_descriptor *)0)->create_pacing))
 
 #if defined(__cplusplus)
 static_assert(sizeof(enum rptadv_samplerate_adapter_result) == sizeof(int), "C-int ABI required");

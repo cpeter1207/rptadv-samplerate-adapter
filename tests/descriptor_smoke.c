@@ -44,5 +44,15 @@ int main(void)
 	assert(output_generated <= 1024);
 	assert(descriptor->reset(converter) == RPTADV_SAMPLERATE_ADAPTER_OK);
 	descriptor->destroy(converter);
+	assert(descriptor->struct_size >= RPTADV_SAMPLERATE_ADAPTER_DESCRIPTOR_PACING_MIN_SIZE);
+	assert(descriptor->create_pacing != NULL);
+	assert(descriptor->create_pacing(48000, 48000, 512, 1024, 1.0 / 1.02,
+					1.0, &converter) == RPTADV_SAMPLERATE_ADAPTER_OK);
+	assert(converter != NULL);
+	assert(descriptor->process(converter, input, 512, output, 1024, 1.0 / 1.02,
+				   &input_used, &output_generated) == RPTADV_SAMPLERATE_ADAPTER_OK);
+	assert(input_used == 512 && output_generated > 0 && output_generated <= 512);
+	assert(descriptor->reset(converter) == RPTADV_SAMPLERATE_ADAPTER_OK);
+	descriptor->destroy(converter);
 	return 0;
 }
